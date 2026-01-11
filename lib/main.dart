@@ -156,7 +156,7 @@ class _AppShellState extends State<AppShell> {
   // expose a helper so Assignment page can jump to Account → Setup Device
   void goToAccountSetup() {
     setState(() {
-      _currentIndex = 3; // Account tab index
+      _currentIndex = 3;
     });
     accountPageKey.currentState?.openSetupDevice();
   }
