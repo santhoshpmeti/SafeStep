@@ -9,6 +9,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:fl_chart/fl_chart.dart';
 import 'package:csv/csv.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // =============================================================
 // CONFIG
@@ -42,6 +43,48 @@ class DeviceManager {
 }
 
 // =============================================================
+// TEST HISTORY MANAGER
+// =============================================================
+class TestHistoryManager {
+  static final List<Map<String, dynamic>> _testHistory = [];
+
+  static List<Map<String, dynamic>> get history =>
+      List.unmodifiable(_testHistory);
+
+  static void addTest(Map<String, dynamic> result) {
+    _testHistory.insert(0, {
+      'date': DateTime.now().toIso8601String(),
+      'duration': result['duration_s'] ?? 0,
+      'totalSteps': result['total_steps'] ?? 0,
+      'symmetry': result['symmetry_percent'],
+      'cadence': result['cadence_spm'] ?? 0,
+    });
+  }
+
+  static int get todayTestCount {
+    final today = DateTime.now();
+    return _testHistory.where((t) {
+      final date = DateTime.parse(t['date']);
+      return date.year == today.year &&
+          date.month == today.month &&
+          date.day == today.day;
+    }).length;
+  }
+
+  static int get todayTotalSteps {
+    final today = DateTime.now();
+    return _testHistory
+        .where((t) {
+          final date = DateTime.parse(t['date']);
+          return date.year == today.year &&
+              date.month == today.month &&
+              date.day == today.day;
+        })
+        .fold(0, (sum, t) => sum + (t['totalSteps'] as int? ?? 0));
+  }
+}
+
+// =============================================================
 // APP ENTRY
 // =============================================================
 void main() {
@@ -56,7 +99,25 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'SafeStep',
-      theme: ThemeData(primarySwatch: Colors.teal),
+      theme: ThemeData(
+        primarySwatch: Colors.teal,
+        primaryColor: Colors.teal,
+        scaffoldBackgroundColor: const Color(
+          0xFFE0F2F1,
+        ), // Light cyan background
+        appBarTheme: AppBarTheme(
+          backgroundColor: Colors.teal.shade600,
+          foregroundColor: Colors.white,
+          elevation: 0,
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.teal.shade600,
+            foregroundColor: Colors.white,
+          ),
+        ),
+        cardTheme: const CardThemeData(color: Colors.white, elevation: 2),
+      ),
       home: const SplashScreen(),
     );
   }
@@ -161,6 +222,230 @@ class _AppShellState extends State<AppShell> {
     accountPageKey.currentState?.openSetupDevice();
   }
 
+  Future<void> _showReminderPopup(BuildContext context) async {
+    final prefs = await SharedPreferences.getInstance();
+    final remindersJson = prefs.getString('test_reminders');
+    List<Map<String, dynamic>> reminders = [];
+
+    if (remindersJson != null) {
+      reminders = List<Map<String, dynamic>>.from(
+        jsonDecode(remindersJson).map((x) => Map<String, dynamic>.from(x)),
+      );
+    }
+
+    // Find the nearest upcoming reminder
+    Map<String, dynamic>? nearestReminder;
+    String nearestReminderText = '';
+
+    if (reminders.isNotEmpty) {
+      final now = TimeOfDay.now();
+      final currentMinutes = now.hour * 60 + now.minute;
+      final dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+      final todayIndex = DateTime.now().weekday - 1; // 0-6 for Mon-Sun
+
+      int smallestDiff = 999999;
+
+      for (final reminder in reminders) {
+        // Parse time from stored string format "hour:minute"
+        final timeStr = reminder['time'] as String? ?? '0:0';
+        final timeParts = timeStr.split(':');
+        final hour = int.tryParse(timeParts[0]) ?? 0;
+        final minute = timeParts.length > 1
+            ? (int.tryParse(timeParts[1]) ?? 0)
+            : 0;
+        final days = List<bool>.from(reminder['days'] ?? List.filled(7, false));
+
+        final reminderMinutes = hour * 60 + minute;
+
+        // Check today first
+        if (days[todayIndex] && reminderMinutes > currentMinutes) {
+          final diff = reminderMinutes - currentMinutes;
+          if (diff < smallestDiff) {
+            smallestDiff = diff;
+            nearestReminder = reminder;
+            final time = TimeOfDay(hour: hour, minute: minute);
+            nearestReminderText = 'Today at ${time.format(context)}';
+          }
+        }
+
+        // Check other days
+        for (int i = 1; i <= 7; i++) {
+          final checkDay = (todayIndex + i) % 7;
+          if (days[checkDay]) {
+            final diff = i * 24 * 60 + (reminderMinutes - currentMinutes);
+            if (diff < smallestDiff) {
+              smallestDiff = diff;
+              nearestReminder = reminder;
+              final time = TimeOfDay(hour: hour, minute: minute);
+              if (i == 1) {
+                nearestReminderText = 'Tomorrow at ${time.format(context)}';
+              } else {
+                nearestReminderText =
+                    '${dayNames[checkDay]} at ${time.format(context)}';
+              }
+            }
+            break; // Found nearest for this reminder
+          }
+        }
+      }
+    }
+
+    if (!context.mounted) return;
+
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Reminder Popup',
+      barrierColor: Colors.black54,
+      transitionDuration: const Duration(milliseconds: 300),
+      pageBuilder: (context, anim1, anim2) {
+        return Center(
+          child: Material(
+            color: Colors.transparent,
+            child: Container(
+              width: MediaQuery.of(context).size.width * 0.85,
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  colors: [Colors.white, Colors.teal.shade50],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(24),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.teal.withOpacity(0.3),
+                    blurRadius: 20,
+                    spreadRadius: 5,
+                  ),
+                ],
+              ),
+              child: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  // Close button - larger tap area
+                  Positioned(
+                    top: -16,
+                    right: -16,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () => Navigator.pop(context),
+                      child: Container(
+                        padding: const EdgeInsets.all(12),
+                        child: Container(
+                          padding: const EdgeInsets.all(6),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade200,
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withOpacity(0.1),
+                                blurRadius: 4,
+                              ),
+                            ],
+                          ),
+                          child: Icon(
+                            Icons.close,
+                            size: 18,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  // Content
+                  Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: nearestReminder != null
+                              ? Colors.teal.shade100
+                              : Colors.grey.shade200,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          nearestReminder != null
+                              ? Icons.notifications_active
+                              : Icons.notifications_off_outlined,
+                          size: 40,
+                          color: nearestReminder != null
+                              ? Colors.teal.shade700
+                              : Colors.grey.shade500,
+                        ),
+                      ),
+                      const SizedBox(height: 20),
+                      Text(
+                        nearestReminder != null
+                            ? 'Upcoming Reminder'
+                            : 'No Reminders Set',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.teal.shade800,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      Text(
+                        nearestReminder != null
+                            ? nearestReminderText
+                            : 'Set a reminder to stay on track with your gait tests',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 16,
+                          color: Colors.grey.shade600,
+                        ),
+                      ),
+                      const SizedBox(height: 24),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton(
+                          onPressed: () {
+                            Navigator.pop(context);
+                            if (nearestReminder == null) {
+                              // Navigate to test page to set reminder
+                              setState(() {
+                                _currentIndex = 2;
+                              });
+                            }
+                          },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.teal,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: Text(
+                            nearestReminder != null ? 'Got it' : 'Set Reminder',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (context, anim1, anim2, child) {
+        return FadeTransition(
+          opacity: anim1,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.8, end: 1.0).animate(
+              CurvedAnimation(parent: anim1, curve: Curves.easeOutBack),
+            ),
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -169,19 +454,23 @@ class _AppShellState extends State<AppShell> {
         elevation: 1,
         title: Row(
           children: [
+            Image.asset('assets/Safe.png', height: 36, fit: BoxFit.contain),
             const SizedBox(width: 12),
-            Image.asset('assets/Safe.png', height: 40, fit: BoxFit.contain),
-            const Spacer(),
-            Padding(
-              padding: const EdgeInsets.only(right: 24),
-              child: Text(
-                'SafeStep',
-                style: TextStyle(
-                  color: Colors.teal,
-                  fontSize: 18,
-                  fontWeight: FontWeight.w500,
-                ),
+            Text(
+              'SafeStep',
+              style: TextStyle(
+                color: Colors.teal.shade700,
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
               ),
+            ),
+            const Spacer(),
+            IconButton(
+              icon: Icon(
+                Icons.notifications_outlined,
+                color: Colors.teal.shade600,
+              ),
+              onPressed: () => _showReminderPopup(context),
             ),
           ],
         ),
@@ -197,35 +486,74 @@ class _AppShellState extends State<AppShell> {
           ],
         ),
       ),
-      bottomNavigationBar: BottomNavigationBar(
-        currentIndex: _currentIndex,
-        selectedItemColor: Colors.teal,
-        unselectedItemColor: Colors.grey,
-        type: BottomNavigationBarType.fixed,
-        enableFeedback: false,
-        selectedFontSize: 12,
-        unselectedFontSize: 12,
-        iconSize: 22,
-        onTap: (i) {
-          setState(() {
-            _currentIndex = i;
-            if (i == 3) {
-              accountPageKey.currentState?.resetToHome();
-            }
-          });
-        },
-        items: const [
-          BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Home'),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.description),
-            label: 'Reports',
+      bottomNavigationBar: Container(
+        decoration: BoxDecoration(
+          color: Colors.white,
+          boxShadow: [
+            BoxShadow(
+              color: Colors.grey.withOpacity(0.2),
+              blurRadius: 10,
+              offset: const Offset(0, -5),
+            ),
+          ],
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceAround,
+              children: [
+                _buildNavItem(Icons.home_rounded, 'Home', 0),
+                _buildNavItem(Icons.description_rounded, 'Reports', 1),
+                _buildNavItem(Icons.play_circle_filled, 'Test', 2),
+                _buildNavItem(Icons.person_rounded, 'Account', 3),
+              ],
+            ),
           ),
-          BottomNavigationBarItem(
-            icon: Icon(Icons.assignment),
-            label: 'Assignment',
-          ),
-          BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Account'),
-        ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNavItem(IconData icon, String label, int index) {
+    final isSelected = _currentIndex == index;
+    return GestureDetector(
+      onTap: () {
+        setState(() {
+          _currentIndex = index;
+          if (index == 3) {
+            accountPageKey.currentState?.resetToHome();
+          }
+        });
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+          color: isSelected ? Colors.teal.shade50 : Colors.transparent,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              color: isSelected ? Colors.teal.shade600 : Colors.grey.shade500,
+              size: isSelected ? 20 : 28,
+            ),
+            if (isSelected) ...[
+              const SizedBox(height: 2),
+              Text(
+                label,
+                style: TextStyle(
+                  color: Colors.teal.shade700,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 10,
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
@@ -260,133 +588,436 @@ class ImuSample {
 }
 
 // =============================================================
-// HOME PAGE (WITH ANIMATED WALKING ICON)
+// HOME PAGE (IMPROVED WITH GREETING & DYNAMIC DATA)
 // =============================================================
-class HomePage extends StatelessWidget {
+class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
   @override
+  State<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends State<HomePage> {
+  String _getGreeting() {
+    final hour = DateTime.now().hour;
+    if (hour < 12) return 'Good Morning';
+    if (hour < 17) return 'Good Afternoon';
+    return 'Good Evening';
+  }
+
+  @override
   Widget build(BuildContext context) {
-    // Check connection status
     final bool leftConnected = DeviceManager.leftDevice != null;
     final bool rightConnected = DeviceManager.rightDevice != null;
     final bool bothConnected = DeviceManager.isReady;
+    final todayTests = TestHistoryManager.todayTestCount;
+    final todaySteps = TestHistoryManager.todayTotalSteps;
 
     return Container(
-      color: Colors.white,
-      child: Column(
-        children: [
-          // Header - Dynamic based on connection
-          Container(
-            padding: const EdgeInsets.all(20),
-            color: bothConnected ? Colors.teal.shade50 : Colors.orange.shade50,
-            child: Column(
-              children: [
-                Row(
+      color: const Color(0xFFE0F2F1), // Light cyan background
+      child: RefreshIndicator(
+        color: Colors.teal,
+        onRefresh: () async {
+          setState(() {});
+        },
+        child: SingleChildScrollView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Container(
-                      padding: const EdgeInsets.all(8),
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: Icon(
-                        bothConnected
-                            ? Icons.directions_walk
-                            : Icons.warning_amber_rounded,
-                        color: bothConnected ? Colors.teal : Colors.orange,
+                    // Recovery Progress Section - Clickable
+                    GestureDetector(
+                      onTap: () {
+                        // Navigate to Reports tab
+                        appShellKey.currentState?.setState(() {
+                          appShellKey.currentState?._currentIndex = 1;
+                        });
+                      },
+                      child: _recoveryProgressCard(),
+                    ),
+
+                    const SizedBox(height: 28),
+
+                    // Weight Balance Section - Clickable
+                    const Text(
+                      'Weight Distribution',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            bothConnected
-                                ? 'Ready to Record'
-                                : leftConnected || rightConnected
-                                ? 'Setup Incomplete'
-                                : 'No Devices Connected',
-                            style: const TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: () {
+                              appShellKey.currentState?.setState(() {
+                                appShellKey.currentState?._currentIndex = 1;
+                              });
+                            },
+                            child: _weightBalanceCard(
+                              'Left Foot',
+                              48.5,
+                              Colors.blue,
+                              Icons.chevron_left,
                             ),
                           ),
-                          Text(
-                            bothConnected
-                                ? 'Both devices connected'
-                                : leftConnected || rightConnected
-                                ? 'Connect remaining device'
-                                : 'Please connect both footwear',
-                            style: const TextStyle(
-                              fontSize: 13,
-                              color: Colors.grey,
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: GestureDetector(
+                            onTap: () {
+                              appShellKey.currentState?.setState(() {
+                                appShellKey.currentState?._currentIndex = 1;
+                              });
+                            },
+                            child: _weightBalanceCard(
+                              'Right Foot',
+                              51.5,
+                              Colors.orange,
+                              Icons.chevron_right,
                             ),
+                          ),
+                        ),
+                      ],
+                    ),
+
+                    const SizedBox(height: 28),
+
+                    // Device Status Section - at bottom
+                    const Text(
+                      'Device Status',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    _combinedDeviceStatusCard(leftConnected, rightConnected),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _statCard({
+    required IconData icon,
+    required String value,
+    required String label,
+    required Color color,
+  }) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, color: color, size: 24),
+          ),
+          const SizedBox(height: 12),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+          ),
+          Text(
+            label,
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _actionCard({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.05),
+                blurRadius: 10,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: color.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: color, size: 24),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  label,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+              Icon(
+                Icons.arrow_forward_ios,
+                size: 14,
+                color: Colors.grey.shade400,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _deviceStatusCard(String name, bool connected, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(
+              color: connected ? Colors.green : Colors.red,
+              shape: BoxShape.circle,
+              boxShadow: [
+                BoxShadow(
+                  color: (connected ? Colors.green : Colors.red).withOpacity(
+                    0.4,
+                  ),
+                  blurRadius: 6,
+                  spreadRadius: 1,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 16),
+          Icon(icon, color: Colors.grey.shade400, size: 20),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(name, style: const TextStyle(fontWeight: FontWeight.w600)),
+                Text(
+                  connected ? 'Connected' : 'Not connected',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: connected
+                        ? Colors.green.shade600
+                        : Colors.red.shade600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (connected)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.green.shade50,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.check, size: 14, color: Colors.green.shade600),
+                  const SizedBox(width: 4),
+                  Text(
+                    'Ready',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.green.shade700,
+                    ),
+                  ),
+                ],
+              ),
+            )
+          else
+            Icon(Icons.link_off, color: Colors.red.shade400, size: 20),
+        ],
+      ),
+    );
+  }
+
+  Widget _combinedDeviceStatusCard(bool leftConnected, bool rightConnected) {
+    final bothConnected = leftConnected && rightConnected;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              // Left device indicator
+              Expanded(
+                child: Row(
+                  children: [
+                    Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: leftConnected ? Colors.green : Colors.red,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: (leftConnected ? Colors.green : Colors.red)
+                                .withOpacity(0.4),
+                            blurRadius: 6,
+                            spreadRadius: 1,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    const Text(
+                      'Left',
+                      style: TextStyle(fontWeight: FontWeight.w500),
+                    ),
+                  ],
+                ),
+              ),
+              // Status badge
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
+                decoration: BoxDecoration(
+                  color: bothConnected
+                      ? Colors.green.shade50
+                      : Colors.orange.shade50,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  bothConnected ? 'Ready' : 'Setup Required',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: bothConnected
+                        ? Colors.green.shade700
+                        : Colors.orange.shade700,
+                  ),
+                ),
+              ),
+              // Right device indicator
+              Expanded(
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.end,
+                  children: [
+                    const Text(
+                      'Right',
+                      style: TextStyle(fontWeight: FontWeight.w500),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: rightConnected ? Colors.green : Colors.red,
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: (rightConnected ? Colors.green : Colors.red)
+                                .withOpacity(0.4),
+                            blurRadius: 6,
+                            spreadRadius: 1,
                           ),
                         ],
                       ),
                     ),
                   ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
-
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Today's Activity
-                  const Text(
-                    'Today\'s Activity',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 16),
-
-                  Container(
-                    padding: const EdgeInsets.all(20),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [Colors.teal.shade400, Colors.teal.shade600],
-                      ),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        _statItem('0', 'Tests', Icons.assignment_turned_in),
-                        Container(width: 1, height: 40, color: Colors.white30),
-                        _statItem('0', 'Steps', Icons.directions_walk),
-                        Container(width: 1, height: 40, color: Colors.white30),
-                        _statItem('0', 'Minutes', Icons.timer),
-                      ],
-                    ),
-                  ),
-
-                  const SizedBox(height: 32),
-
-                  // Device Status
-                  const Text(
-                    'Device Status',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 16),
-
-                  _deviceStatusRow(
-                    'Left Footwear',
-                    leftConnected,
-                    leftConnected ? 98 : null,
-                  ),
-                  const SizedBox(height: 12),
-                  _deviceStatusRow(
-                    'Right Footwear',
-                    rightConnected,
-                    rightConnected ? 95 : null,
-                  ),
-                ],
+          const SizedBox(height: 16),
+          // Setup Device Button
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: () {
+                appShellKey.currentState?.goToAccountSetup();
+              },
+              icon: Icon(
+                Icons.bluetooth_connected,
+                color: Colors.teal.shade600,
+                size: 18,
+              ),
+              label: Text(
+                bothConnected ? 'Manage Devices' : 'Setup Device',
+                style: TextStyle(
+                  color: Colors.teal.shade600,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              style: OutlinedButton.styleFrom(
+                side: BorderSide(color: Colors.teal.shade300),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
             ),
           ),
@@ -395,419 +1026,1219 @@ class HomePage extends StatelessWidget {
     );
   }
 
-  Widget _statItem(String value, String label, IconData icon) {
+  Widget _recoveryProgressCard() {
+    // Placeholder values - will be calculated from actual data
+    final gaitScore = 85;
+    final recoveryProgress = 0.72; // 72% recovery
+
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Colors.teal.shade400, Colors.teal.shade600],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.teal.withOpacity(0.3),
+            blurRadius: 15,
+            offset: const Offset(0, 5),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Progress',
+                    style: TextStyle(color: Colors.white70, fontSize: 14),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        '$gaitScore',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 42,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const Padding(
+                        padding: EdgeInsets.only(bottom: 8, left: 4),
+                        child: Text(
+                          '/100',
+                          style: TextStyle(color: Colors.white70, fontSize: 16),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.trending_up,
+                  color: Colors.white,
+                  size: 28,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          const Text(
+            'Recovery Progress',
+            style: TextStyle(color: Colors.white70, fontSize: 14),
+          ),
+          const SizedBox(height: 8),
+          // Interactive Progress Bar
+          Stack(
+            children: [
+              Container(
+                height: 12,
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(6),
+                ),
+              ),
+              FractionallySizedBox(
+                widthFactor: recoveryProgress,
+                child: Container(
+                  height: 12,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [Colors.white, Colors.white.withOpacity(0.8)],
+                    ),
+                    borderRadius: BorderRadius.circular(6),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.white.withOpacity(0.4),
+                        blurRadius: 6,
+                        spreadRadius: 1,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '${(recoveryProgress * 100).toInt()}% Complete',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const Text(
+                'Target: 100%',
+                style: TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _weightBalanceCard(
+    String label,
+    double percentage,
+    Color color,
+    IconData icon,
+  ) {
+    final isBalanced = (percentage - 50).abs() < 5;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, color: color, size: 20),
+              const SizedBox(width: 4),
+              Text(
+                label,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 14,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Circular progress indicator
+          Stack(
+            alignment: Alignment.center,
+            children: [
+              SizedBox(
+                width: 80,
+                height: 80,
+                child: CircularProgressIndicator(
+                  value: percentage / 100,
+                  strokeWidth: 8,
+                  backgroundColor: Colors.grey.shade200,
+                  valueColor: AlwaysStoppedAnimation<Color>(color),
+                ),
+              ),
+              Column(
+                children: [
+                  Text(
+                    '${percentage.toStringAsFixed(1)}%',
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: color,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: isBalanced ? Colors.green.shade50 : Colors.orange.shade50,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              isBalanced ? 'Balanced' : 'Adjust',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: isBalanced
+                    ? Colors.green.shade700
+                    : Colors.orange.shade700,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// =============================================================
+// REPORTS PAGE (WITH TEST HISTORY)
+// =============================================================
+class ReportsPage extends StatefulWidget {
+  const ReportsPage({super.key});
+
+  @override
+  State<ReportsPage> createState() => _ReportsPageState();
+}
+
+class _ReportsPageState extends State<ReportsPage> {
+  // Fake report data for demonstration
+  final List<Map<String, dynamic>> _fakeReports = [
+    {
+      'date': DateTime.now()
+          .subtract(const Duration(days: 0))
+          .toIso8601String(),
+      'totalSteps': 245,
+      'duration': 32.5,
+      'symmetry': 87.5,
+      'leftSteps': 122,
+      'rightSteps': 123,
+    },
+    {
+      'date': DateTime.now()
+          .subtract(const Duration(days: 1))
+          .toIso8601String(),
+      'totalSteps': 198,
+      'duration': 28.0,
+      'symmetry': 82.3,
+      'leftSteps': 95,
+      'rightSteps': 103,
+    },
+    {
+      'date': DateTime.now()
+          .subtract(const Duration(days: 2))
+          .toIso8601String(),
+      'totalSteps': 312,
+      'duration': 45.2,
+      'symmetry': 91.2,
+      'leftSteps': 154,
+      'rightSteps': 158,
+    },
+    {
+      'date': DateTime.now()
+          .subtract(const Duration(days: 4))
+          .toIso8601String(),
+      'totalSteps': 156,
+      'duration': 22.8,
+      'symmetry': 74.5,
+      'leftSteps': 68,
+      'rightSteps': 88,
+    },
+    {
+      'date': DateTime.now()
+          .subtract(const Duration(days: 5))
+          .toIso8601String(),
+      'totalSteps': 278,
+      'duration': 38.1,
+      'symmetry': 88.9,
+      'leftSteps': 136,
+      'rightSteps': 142,
+    },
+    {
+      'date': DateTime.now()
+          .subtract(const Duration(days: 7))
+          .toIso8601String(),
+      'totalSteps': 189,
+      'duration': 26.4,
+      'symmetry': 79.8,
+      'leftSteps': 85,
+      'rightSteps': 104,
+    },
+    {
+      'date': DateTime.now()
+          .subtract(const Duration(days: 10))
+          .toIso8601String(),
+      'totalSteps': 234,
+      'duration': 33.7,
+      'symmetry': 85.6,
+      'leftSteps': 112,
+      'rightSteps': 122,
+    },
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    // Combine real history with fake reports for demo
+    final history = TestHistoryManager.history.isEmpty
+        ? _fakeReports
+        : TestHistoryManager.history;
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFE0F2F1), // Light cyan background
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              // Header Stats with Cyan gradient and curvy edges
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [Colors.teal.shade400, Colors.teal.shade600],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(20),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.teal.withOpacity(0.3),
+                      blurRadius: 15,
+                      offset: const Offset(0, 5),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Test History',
+                      style: TextStyle(
+                        fontSize: 24,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    // Summary Stats
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                      children: [
+                        _reportStat('${history.length}', 'Tests'),
+                        Container(
+                          height: 30,
+                          width: 1,
+                          color: Colors.white.withOpacity(0.3),
+                        ),
+                        _reportStat('85%', 'Avg Score'),
+                        Container(
+                          height: 30,
+                          width: 1,
+                          color: Colors.white.withOpacity(0.3),
+                        ),
+                        _reportStat('14', 'Days'),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              // Test List
+              Expanded(
+                child: history.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(
+                              Icons.history,
+                              size: 80,
+                              color: Colors.grey.shade300,
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              'No tests yet',
+                              style: TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.grey.shade600,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Complete your first test to see results here',
+                              style: TextStyle(
+                                fontSize: 14,
+                                color: Colors.grey.shade500,
+                              ),
+                            ),
+                            const SizedBox(height: 24),
+                            ElevatedButton.icon(
+                              onPressed: () {
+                                appShellKey.currentState?.setState(() {
+                                  appShellKey.currentState?._currentIndex = 2;
+                                });
+                              },
+                              icon: const Icon(Icons.play_arrow),
+                              label: const Text('Take First Test'),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.teal,
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 24,
+                                  vertical: 12,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      )
+                    : RefreshIndicator(
+                        onRefresh: () async {
+                          setState(() {});
+                        },
+                        child: ListView.builder(
+                          padding: const EdgeInsets.all(16),
+                          itemCount: history.length,
+                          itemBuilder: (context, index) {
+                            final test = history[index];
+                            final date = DateTime.parse(test['date']);
+                            final symmetry = test['symmetry'];
+                            final isGood = symmetry != null && symmetry > 80;
+
+                            return Card(
+                              margin: const EdgeInsets.only(bottom: 12),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: InkWell(
+                                onTap: () {
+                                  _showReportDetail(context, test);
+                                },
+                                borderRadius: BorderRadius.circular(12),
+                                child: Padding(
+                                  padding: const EdgeInsets.all(16),
+                                  child: Row(
+                                    children: [
+                                      // Date indicator
+                                      Container(
+                                        width: 50,
+                                        height: 50,
+                                        decoration: BoxDecoration(
+                                          color: Colors.teal.shade50,
+                                          borderRadius: BorderRadius.circular(
+                                            10,
+                                          ),
+                                        ),
+                                        child: Column(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          children: [
+                                            Text(
+                                              '${date.day}',
+                                              style: TextStyle(
+                                                fontSize: 18,
+                                                fontWeight: FontWeight.bold,
+                                                color: Colors.teal.shade700,
+                                              ),
+                                            ),
+                                            Text(
+                                              _getMonthAbbr(date.month),
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                color: Colors.teal.shade600,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(width: 16),
+                                      // Test info
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: [
+                                            Text(
+                                              'Gait Analysis Test',
+                                              style: const TextStyle(
+                                                fontWeight: FontWeight.w600,
+                                                fontSize: 15,
+                                              ),
+                                            ),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              '${test['totalSteps']} steps • ${(test['duration'] as num).toStringAsFixed(1)}s',
+                                              style: TextStyle(
+                                                fontSize: 13,
+                                                color: Colors.grey.shade600,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      // Symmetry score
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                          vertical: 6,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: isGood
+                                              ? Colors.green.shade50
+                                              : Colors.orange.shade50,
+                                          borderRadius: BorderRadius.circular(
+                                            20,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          symmetry != null
+                                              ? '${symmetry.toStringAsFixed(0)}%'
+                                              : 'N/A',
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            color: isGood
+                                                ? Colors.green.shade700
+                                                : Colors.orange.shade700,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showReportDetail(BuildContext context, Map<String, dynamic> test) {
+    final date = DateTime.parse(test['date']);
+    final symmetry = test['symmetry'] as double?;
+    final totalSteps = test['totalSteps'] as int;
+    final duration = test['duration'] as num;
+    final leftSteps = test['leftSteps'] as int? ?? (totalSteps ~/ 2);
+    final rightSteps = test['rightSteps'] as int? ?? (totalSteps - leftSteps);
+    final isGood = symmetry != null && symmetry > 80;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        height: MediaQuery.of(context).size.height * 0.85,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Colors.white.withOpacity(0.98), Colors.white],
+          ),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          children: [
+            // Handle bar
+            Container(
+              margin: const EdgeInsets.only(top: 12),
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            // Header
+            Container(
+              padding: const EdgeInsets.all(20),
+              child: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.teal.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Icon(
+                      Icons.assessment,
+                      color: Colors.teal.shade600,
+                      size: 28,
+                    ),
+                  ),
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Gait Analysis Report',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        Text(
+                          '${_getMonthAbbr(date.month)} ${date.day}, ${date.year} at ${date.hour}:${date.minute.toString().padLeft(2, '0')}',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+            ),
+            Divider(height: 1, color: Colors.grey.shade200),
+            // Content
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Overall Score Card
+                    Container(
+                      padding: const EdgeInsets.all(24),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: isGood
+                              ? [Colors.green.shade400, Colors.green.shade600]
+                              : [
+                                  Colors.orange.shade400,
+                                  Colors.orange.shade600,
+                                ],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Overall Symmetry',
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    color: Colors.white.withOpacity(0.9),
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Text(
+                                  '${symmetry?.toStringAsFixed(1) ?? 'N/A'}%',
+                                  style: const TextStyle(
+                                    fontSize: 42,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                                const SizedBox(height: 8),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 6,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.2),
+                                    borderRadius: BorderRadius.circular(20),
+                                  ),
+                                  child: Text(
+                                    isGood
+                                        ? '✓ Good Balance'
+                                        : '⚠ Needs Attention',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.all(16),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.2),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              isGood ? Icons.thumb_up : Icons.warning,
+                              color: Colors.white,
+                              size: 32,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+
+                    // Test Metrics
+                    const Text(
+                      'Test Metrics',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _reportMetricCard(
+                            'Total Steps',
+                            '$totalSteps',
+                            Icons.directions_walk,
+                            Colors.blue,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _reportMetricCard(
+                            'Duration',
+                            '${duration.toStringAsFixed(1)}s',
+                            Icons.timer,
+                            Colors.purple,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _reportMetricCard(
+                            'Left Steps',
+                            '$leftSteps',
+                            Icons.chevron_left,
+                            Colors.teal,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _reportMetricCard(
+                            'Right Steps',
+                            '$rightSteps',
+                            Icons.chevron_right,
+                            Colors.teal,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 24),
+
+                    // Step Distribution
+                    const Text(
+                      'Step Distribution',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(color: Colors.grey.shade200),
+                      ),
+                      child: Column(
+                        children: [
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Column(
+                                  children: [
+                                    Text(
+                                      'Left',
+                                      style: TextStyle(
+                                        color: Colors.grey.shade600,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      '${(leftSteps / totalSteps * 100).toStringAsFixed(1)}%',
+                                      style: TextStyle(
+                                        fontSize: 24,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.teal.shade700,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              Container(
+                                width: 1,
+                                height: 50,
+                                color: Colors.grey.shade300,
+                              ),
+                              Expanded(
+                                child: Column(
+                                  children: [
+                                    Text(
+                                      'Right',
+                                      style: TextStyle(
+                                        color: Colors.grey.shade600,
+                                        fontSize: 14,
+                                      ),
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Text(
+                                      '${(rightSteps / totalSteps * 100).toStringAsFixed(1)}%',
+                                      style: TextStyle(
+                                        fontSize: 24,
+                                        fontWeight: FontWeight.bold,
+                                        color: Colors.teal.shade700,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          // Progress bar
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  flex: leftSteps,
+                                  child: Container(
+                                    height: 12,
+                                    color: Colors.teal.shade400,
+                                  ),
+                                ),
+                                Expanded(
+                                  flex: rightSteps,
+                                  child: Container(
+                                    height: 12,
+                                    color: Colors.teal.shade700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+
+                    // Recommendations
+                    const Text(
+                      'Recommendations',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.blue.shade50,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.blue.shade100),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.lightbulb_outline,
+                            color: Colors.blue.shade600,
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Text(
+                              isGood
+                                  ? 'Great job! Your gait symmetry is within the healthy range. Continue with regular walking exercises.'
+                                  : 'Your gait shows some asymmetry. Consider consulting with your doctor and practicing balance exercises.',
+                              style: TextStyle(
+                                color: Colors.blue.shade800,
+                                height: 1.4,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+
+                    // Action Buttons
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton.icon(
+                            onPressed: () {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Report shared!'),
+                                  backgroundColor: Colors.teal,
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.share),
+                            label: const Text('Share'),
+                            style: OutlinedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              side: BorderSide(color: Colors.teal.shade300),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: ElevatedButton.icon(
+                            onPressed: () {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('PDF downloaded!'),
+                                  backgroundColor: Colors.teal,
+                                ),
+                              );
+                            },
+                            icon: const Icon(Icons.download),
+                            label: const Text('Download PDF'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.teal,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _reportMetricCard(
+    String label,
+    String value,
+    IconData icon,
+    Color color,
+  ) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: color.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(icon, color: color, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+              ),
+              Text(
+                value,
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _summaryChip(IconData icon, String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withOpacity(0.3)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 6),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _reportStat(String value, String label) {
     return Column(
       children: [
-        Icon(icon, color: Colors.white, size: 28),
-        const SizedBox(height: 8),
         Text(
           value,
           style: const TextStyle(
-            fontSize: 24,
+            fontSize: 20,
             fontWeight: FontWeight.bold,
             color: Colors.white,
           ),
         ),
+        const SizedBox(height: 4),
         Text(
           label,
-          style: const TextStyle(fontSize: 12, color: Colors.white70),
+          style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.8)),
         ),
       ],
     );
   }
 
-  Widget _deviceStatusRow(String name, bool connected, int? battery) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: connected ? Colors.grey.shade50 : Colors.red.shade50,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: connected ? Colors.grey.shade200 : Colors.red.shade200,
-        ),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(
-              color: connected ? Colors.green : Colors.red,
-              shape: BoxShape.circle,
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              name,
-              style: const TextStyle(fontWeight: FontWeight.w600),
-            ),
-          ),
-          if (connected && battery != null) ...[
-            Icon(Icons.battery_full, color: Colors.green.shade600, size: 20),
-            const SizedBox(width: 4),
-            Text(
-              '$battery%',
-              style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
-            ),
-          ] else ...[
-            Icon(Icons.link_off, color: Colors.red.shade600, size: 20),
-            const SizedBox(width: 4),
-            Text(
-              'Not connected',
-              style: TextStyle(
-                fontSize: 13,
-                color: Colors.red.shade700,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-// =============================================================
-// REPORTS PAGE
-// =============================================================
-class ReportsPage extends StatelessWidget {
-  const ReportsPage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: Colors.white,
-      child: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.bar_chart, size: 100, color: Colors.teal.shade200),
-              const SizedBox(height: 24),
-              Text(
-                'Reports',
-                style: TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.teal.shade900,
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                'View your test history and progress',
-                style: TextStyle(fontSize: 16, color: Colors.grey.shade600),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 24),
-              const Text(
-                'Coming soon...',
-                style: TextStyle(
-                  fontSize: 14,
-                  color: Colors.grey,
-                  fontStyle: FontStyle.italic,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// =============================================================
-// ASSIGNMENT HOME PAGE (WITH CONNECTION CHECK)
-// =============================================================
-class AssignmentHomePage extends StatelessWidget {
-  const AssignmentHomePage({super.key});
-
-  void _handleTakeTest(BuildContext context) {
-    print('═══════════════════════════════');
-    print('🎯 TAKE TEST CLICKED');
-    print('═══════════════════════════════');
-    print('Left device: ${DeviceManager.leftDevice?.platformName ?? "NULL"}');
-    print('Right device: ${DeviceManager.rightDevice?.platformName ?? "NULL"}');
-    print('IsReady: ${DeviceManager.isReady}');
-
-    // Check if both devices are connected
-    if (!DeviceManager.isReady) {
-      print('❌ Devices not ready - showing dialog');
-
-      // Show dialog and redirect to setup
-      showDialog(
-        context: context,
-        builder: (context) {
-          return AlertDialog(
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  // Large error icon centered
-                  const Icon(
-                    Icons.warning_amber_rounded,
-                    color: Colors.orange,
-                    size: 80,
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Title text centered
-                  const Text(
-                    'Connect both footwear',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Please connect both footwear devices before taking a test.',
-                    style: TextStyle(fontSize: 14),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Left Device Status
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        DeviceManager.leftDevice != null
-                            ? Icons.check_circle
-                            : Icons.cancel,
-                        color: DeviceManager.leftDevice != null
-                            ? Colors.green
-                            : Colors.red,
-                        size: 24,
-                      ),
-                      const SizedBox(width: 8),
-                      const Text(
-                        'Left Footwear',
-                        style: TextStyle(fontSize: 16),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-
-                  // Right Device Status
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Icon(
-                        DeviceManager.rightDevice != null
-                            ? Icons.check_circle
-                            : Icons.cancel,
-                        color: DeviceManager.rightDevice != null
-                            ? Colors.green
-                            : Colors.red,
-                        size: 24,
-                      ),
-                      const SizedBox(width: 8),
-                      const Text(
-                        'Right Footwear',
-                        style: TextStyle(fontSize: 16),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 24),
-
-                  // Buttons centered
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context),
-                        child: const Text('Cancel'),
-                      ),
-                      const SizedBox(width: 16),
-                      ElevatedButton(
-                        onPressed: () {
-                          Navigator.pop(context);
-                          appShellKey.currentState?.goToAccountSetup();
-                        },
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.teal,
-                          foregroundColor: Colors.white,
-                        ),
-                        child: const Text('Setup Devices'),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      );
-    } else {
-      // Both devices connected - start test
-      print('✅ Devices ready - navigating to DataCollectionPage');
-
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => DataCollectionPage(
-            leftDevice: DeviceManager.leftDevice!,
-            rightDevice: DeviceManager.rightDevice!,
-          ),
-        ),
-      ).then((_) {
-        print('⬅️ Returned from DataCollectionPage');
-      });
-    }
+  String _formatDate(DateTime date) {
+    return '${date.day}/${date.month}/${date.year}';
   }
 
-  Widget _buildDeviceStatusContent() {
-    return SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text('Connect both footwear'),
-          const SizedBox(height: 16),
-
-          // LEFT
-          Row(
-            children: [
-              Icon(
-                DeviceManager.leftDevice != null
-                    ? Icons.check_circle
-                    : Icons.cancel,
-                color: DeviceManager.leftDevice != null
-                    ? Colors.green
-                    : Colors.red,
-                size: 20,
-              ),
-              const SizedBox(width: 8),
-              const Expanded(
-                child: Text('Left Device', overflow: TextOverflow.ellipsis),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-
-          // RIGHT
-          Row(
-            children: [
-              Icon(
-                DeviceManager.rightDevice != null
-                    ? Icons.check_circle
-                    : Icons.cancel,
-                color: DeviceManager.rightDevice != null
-                    ? Colors.green
-                    : Colors.red,
-                size: 20,
-              ),
-              const SizedBox(width: 8),
-              const Expanded(
-                child: Text('Right Device', overflow: TextOverflow.ellipsis),
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  List<Widget> _buildDeviceStatusActions(BuildContext context) {
-    return [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('Cancel'),
-      ),
-      ElevatedButton(
-        onPressed: () {
-          Navigator.pop(context);
-          appShellKey.currentState?.goToAccountSetup();
-        },
-        style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
-        child: const Text('Setup Devices'),
-      ),
+  String _getMonthAbbr(int month) {
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
     ];
+    return months[month - 1];
+  }
+}
+
+// =============================================================
+// CUSTOM SNACKBAR WIDGET - SUPPORTS ALL SWIPE DIRECTIONS
+// =============================================================
+class _CustomSnackBarWidget extends StatefulWidget {
+  final String message;
+  final IconData icon;
+  final Color color;
+  final VoidCallback onDismiss;
+
+  const _CustomSnackBarWidget({
+    required this.message,
+    required this.icon,
+    required this.color,
+    required this.onDismiss,
+  });
+
+  @override
+  State<_CustomSnackBarWidget> createState() => _CustomSnackBarWidgetState();
+}
+
+class _CustomSnackBarWidgetState extends State<_CustomSnackBarWidget>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<Offset> _slideAnimation;
+  late Animation<double> _fadeAnimation;
+  Offset _dragOffset = Offset.zero;
+  bool _isDragging = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 250),
+    );
+    _slideAnimation = Tween<Offset>(
+      begin: const Offset(0, 1),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOut));
+    _fadeAnimation = Tween<double>(begin: 0, end: 1).animate(_controller);
+    _controller.forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _dismiss() {
+    _controller.reverse().then((_) => widget.onDismiss());
   }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      color: Colors.white,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            // TAKE TEST TODAY BUTTON (1/3)
-            Expanded(
-              flex: 1,
-              child: Card(
-                elevation: 4,
-                color: Colors.teal.shade50,
-                child: InkWell(
-                  onTap: () => _handleTakeTest(context),
-                  child: Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
+    return Positioned(
+      left: 16,
+      right: 16,
+      bottom: 16,
+      child: FadeTransition(
+        opacity: _fadeAnimation,
+        child: SlideTransition(
+          position: _slideAnimation,
+          child: GestureDetector(
+            onPanStart: (_) => setState(() => _isDragging = true),
+            onPanUpdate: (details) {
+              setState(() {
+                _dragOffset += details.delta;
+              });
+            },
+            onPanEnd: (details) {
+              // Dismiss if dragged far enough in any direction
+              if (_dragOffset.dx.abs() > 80 || _dragOffset.dy.abs() > 40) {
+                _dismiss();
+              } else {
+                setState(() {
+                  _dragOffset = Offset.zero;
+                  _isDragging = false;
+                });
+              }
+            },
+            child: Transform.translate(
+              offset: _dragOffset,
+              child: Opacity(
+                opacity: _isDragging
+                    ? (1 - (_dragOffset.distance / 200).clamp(0, 0.5))
+                    : 1,
+                child: Material(
+                  color: Colors.transparent,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: widget.color,
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(
+                          color: widget.color.withOpacity(0.4),
+                          blurRadius: 12,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Row(
                       children: [
-                        Icon(
-                          Icons.assignment_turned_in,
-                          size: 64,
-                          color: Colors.teal,
-                        ),
-                        const SizedBox(height: 16),
-                        Text(
-                          'Take Test Today',
-                          style: TextStyle(
-                            fontSize: 24,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.teal.shade900,
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Icon(
+                            widget.icon,
+                            color: Colors.white,
+                            size: 20,
                           ),
                         ),
-                        const SizedBox(height: 8),
-                        Text(
-                          'Start your gait analysis test',
-                          style: TextStyle(
-                            fontSize: 14,
-                            color: Colors.teal.shade700,
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            widget.message,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
                           ),
                         ),
-                        const SizedBox(height: 16),
-                        // Connection status indicator
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(
-                              DeviceManager.leftDevice != null
-                                  ? Icons.check_circle
-                                  : Icons.circle_outlined,
-                              size: 16,
-                              color: DeviceManager.leftDevice != null
-                                  ? Colors.green
-                                  : Colors.grey,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              'L',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey.shade700,
-                              ),
-                            ),
-                            const SizedBox(width: 16),
-                            Icon(
-                              DeviceManager.rightDevice != null
-                                  ? Icons.check_circle
-                                  : Icons.circle_outlined,
-                              size: 16,
-                              color: DeviceManager.rightDevice != null
-                                  ? Colors.green
-                                  : Colors.grey,
-                            ),
-                            const SizedBox(width: 4),
-                            Text(
-                              'R',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: Colors.grey.shade700,
-                              ),
-                            ),
-                          ],
+                        GestureDetector(
+                          onTap: _dismiss,
+                          child: Icon(
+                            Icons.close,
+                            color: Colors.white.withOpacity(0.7),
+                            size: 20,
+                          ),
                         ),
                       ],
                     ),
@@ -815,58 +2246,1290 @@ class AssignmentHomePage extends StatelessWidget {
                 ),
               ),
             ),
-            const SizedBox(height: 16),
-            // RECENT ASSIGNMENTS (2/3)
-            Expanded(
-              flex: 2,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Recent Assignments',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.grey.shade800,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// =============================================================
+// ASSIGNMENT HOME PAGE - INTERACTIVE TEST PAGE
+// =============================================================
+class AssignmentHomePage extends StatefulWidget {
+  const AssignmentHomePage({super.key});
+
+  @override
+  State<AssignmentHomePage> createState() => _AssignmentHomePageState();
+}
+
+class _AssignmentHomePageState extends State<AssignmentHomePage>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
+  List<Map<String, dynamic>> _reminders = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1500),
+    )..repeat(reverse: true);
+    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.08).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+    _loadReminders();
+  }
+
+  @override
+  void dispose() {
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  OverlayEntry? _snackBarOverlay;
+
+  void _showCustomSnackBar(
+    String message, {
+    IconData icon = Icons.check_circle,
+    Color color = Colors.teal,
+  }) {
+    // Remove existing snackbar if any
+    _snackBarOverlay?.remove();
+    _snackBarOverlay = null;
+
+    late OverlayEntry overlayEntry;
+
+    overlayEntry = OverlayEntry(
+      builder: (context) => _CustomSnackBarWidget(
+        message: message,
+        icon: icon,
+        color: color,
+        onDismiss: () {
+          overlayEntry.remove();
+          _snackBarOverlay = null;
+        },
+      ),
+    );
+
+    _snackBarOverlay = overlayEntry;
+    Overlay.of(context).insert(overlayEntry);
+
+    // Auto dismiss after 2.5 seconds
+    Future.delayed(const Duration(milliseconds: 2500), () {
+      if (_snackBarOverlay == overlayEntry) {
+        overlayEntry.remove();
+        _snackBarOverlay = null;
+      }
+    });
+  }
+
+  Future<void> _loadReminders() async {
+    final prefs = await SharedPreferences.getInstance();
+    final remindersJson = prefs.getString('test_reminders');
+    if (remindersJson != null) {
+      setState(() {
+        _reminders = List<Map<String, dynamic>>.from(
+          jsonDecode(remindersJson).map((x) => Map<String, dynamic>.from(x)),
+        );
+      });
+    }
+  }
+
+  Future<void> _saveReminders() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('test_reminders', jsonEncode(_reminders));
+  }
+
+  void _addReminder() {
+    TimeOfDay selectedTime = TimeOfDay.now();
+    List<bool> selectedDays = List.filled(7, false);
+    final dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setModalState) => Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          padding: EdgeInsets.only(
+            bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+            top: 20,
+            left: 20,
+            right: 20,
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Set Test Reminder',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(height: 20),
+              // Time Picker
+              InkWell(
+                onTap: () async {
+                  final time = await showTimePicker(
+                    context: context,
+                    initialTime: selectedTime,
+                  );
+                  if (time != null) {
+                    setModalState(() => selectedTime = time);
+                  }
+                },
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.grey.shade300),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.access_time, color: Colors.teal),
+                      const SizedBox(width: 12),
+                      Text(
+                        selectedTime.format(context),
+                        style: const TextStyle(fontSize: 18),
+                      ),
+                      const Spacer(),
+                      Icon(Icons.edit, color: Colors.grey.shade400),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              const Text(
+                'Repeat on',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+              ),
+              const SizedBox(height: 12),
+              // Day selector
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: List.generate(7, (index) {
+                  return GestureDetector(
+                    onTap: () {
+                      setModalState(() {
+                        selectedDays[index] = !selectedDays[index];
+                      });
+                    },
+                    child: Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: selectedDays[index]
+                            ? Colors.teal
+                            : Colors.grey.shade200,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Center(
+                        child: Text(
+                          dayNames[index][0],
+                          style: TextStyle(
+                            color: selectedDays[index]
+                                ? Colors.white
+                                : Colors.grey.shade600,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+              ),
+              const SizedBox(height: 24),
+              // Save button
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    if (!selectedDays.contains(true)) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Please select at least one day'),
+                        ),
+                      );
+                      return;
+                    }
+                    final reminder = {
+                      'time': '${selectedTime.hour}:${selectedTime.minute}',
+                      'days': selectedDays,
+                      'enabled': true,
+                    };
+                    setState(() {
+                      _reminders.add(reminder);
+                    });
+                    _saveReminders();
+                    Navigator.pop(context);
+                    _showCustomSnackBar(
+                      'Reminder added!',
+                      icon: Icons.alarm_add,
+                    );
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.teal,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  Expanded(
-                    child: ListView.builder(
-                      itemCount: 5,
-                      itemBuilder: (context, index) {
-                        return Card(
-                          margin: const EdgeInsets.only(bottom: 8),
-                          child: ListTile(
-                            leading: CircleAvatar(
-                              backgroundColor: Colors.teal.shade100,
-                              child: Icon(Icons.assignment, color: Colors.teal),
+                  child: const Text('Save Reminder'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _deleteReminder(int index) {
+    setState(() {
+      _reminders.removeAt(index);
+    });
+    _saveReminders();
+    _showCustomSnackBar(
+      'Reminder deleted',
+      icon: Icons.delete_outline,
+      color: Colors.red.shade400,
+    );
+  }
+
+  void _editReminder(int index) {
+    final reminder = _reminders[index];
+    final timeStr = reminder['time'] as String? ?? '0:0';
+    final timeParts = timeStr.split(':');
+    TimeOfDay selectedTime = TimeOfDay(
+      hour: int.tryParse(timeParts[0]) ?? 0,
+      minute: timeParts.length > 1 ? (int.tryParse(timeParts[1]) ?? 0) : 0,
+    );
+    List<bool> selectedDays = List<bool>.from(
+      reminder['days'] ?? List.filled(7, false),
+    );
+    final dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: 'Edit Reminder',
+      barrierColor: Colors.black87,
+      transitionDuration: const Duration(milliseconds: 300),
+      pageBuilder: (context, anim1, anim2) {
+        return StatefulBuilder(
+          builder: (context, setModalState) => Center(
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                width: MediaQuery.of(context).size.width * 0.9,
+                margin: const EdgeInsets.symmetric(horizontal: 20),
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [Colors.white, Colors.teal.shade50],
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(28),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.teal.withOpacity(0.3),
+                      blurRadius: 25,
+                      spreadRadius: 5,
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(10),
+                              decoration: BoxDecoration(
+                                color: Colors.teal.shade100,
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Icon(
+                                Icons.edit_notifications,
+                                color: Colors.teal.shade700,
+                                size: 24,
+                              ),
                             ),
-                            title: Text('Test ${index + 1}'),
-                            subtitle: Text(
-                              'Completed on ${DateTime.now().subtract(Duration(days: index)).toString().split(' ')[0]}',
+                            const SizedBox(width: 12),
+                            Text(
+                              'Edit Reminder',
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.teal.shade800,
+                              ),
                             ),
-                            trailing: Icon(Icons.arrow_forward_ios, size: 16),
-                            onTap: () {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text(
-                                    'View Test ${index + 1} - details',
+                          ],
+                        ),
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => Navigator.pop(context),
+                          child: Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.grey.shade200,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Icon(
+                              Icons.close,
+                              size: 20,
+                              color: Colors.grey.shade600,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 24),
+                    Text(
+                      'Time',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    InkWell(
+                      onTap: () async {
+                        final time = await showTimePicker(
+                          context: context,
+                          initialTime: selectedTime,
+                        );
+                        if (time != null) {
+                          setModalState(() {
+                            selectedTime = time;
+                          });
+                        }
+                      },
+                      borderRadius: BorderRadius.circular(16),
+                      child: Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.teal.shade200),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.teal.withOpacity(0.1),
+                              blurRadius: 8,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(
+                              Icons.access_time,
+                              color: Colors.teal.shade600,
+                            ),
+                            const SizedBox(width: 12),
+                            Text(
+                              selectedTime.format(context),
+                              style: TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.teal.shade700,
+                              ),
+                            ),
+                            const Spacer(),
+                            Icon(
+                              Icons.arrow_drop_down,
+                              color: Colors.teal.shade400,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Text(
+                      'Repeat on',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.grey.shade700,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: List.generate(7, (i) {
+                        return GestureDetector(
+                          onTap: () {
+                            setModalState(() {
+                              selectedDays[i] = !selectedDays[i];
+                            });
+                          },
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 200),
+                            width: 38,
+                            height: 38,
+                            decoration: BoxDecoration(
+                              color: selectedDays[i]
+                                  ? Colors.teal
+                                  : Colors.white,
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: selectedDays[i]
+                                    ? Colors.teal
+                                    : Colors.grey.shade300,
+                                width: 2,
+                              ),
+                              boxShadow: selectedDays[i]
+                                  ? [
+                                      BoxShadow(
+                                        color: Colors.teal.withOpacity(0.3),
+                                        blurRadius: 6,
+                                        spreadRadius: 1,
+                                      ),
+                                    ]
+                                  : null,
+                            ),
+                            child: Center(
+                              child: Text(
+                                dayNames[i][0],
+                                style: TextStyle(
+                                  color: selectedDays[i]
+                                      ? Colors.white
+                                      : Colors.grey.shade600,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                ),
+                              ),
+                            ),
+                          ),
+                        );
+                      }),
+                    ),
+                    const SizedBox(height: 28),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          if (!selectedDays.contains(true)) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Please select at least one day'),
+                              ),
+                            );
+                            return;
+                          }
+                          setState(() {
+                            _reminders[index] = {
+                              'time':
+                                  '${selectedTime.hour}:${selectedTime.minute}',
+                              'days': selectedDays,
+                              'enabled': true,
+                            };
+                          });
+                          _saveReminders();
+                          Navigator.pop(context);
+                          _showCustomSnackBar(
+                            'Reminder updated!',
+                            icon: Icons.edit_notifications,
+                          );
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.teal,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 16),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          elevation: 4,
+                          shadowColor: Colors.teal.withOpacity(0.4),
+                        ),
+                        child: const Text(
+                          'Update Reminder',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (context, anim1, anim2, child) {
+        return FadeTransition(
+          opacity: anim1,
+          child: ScaleTransition(
+            scale: Tween<double>(begin: 0.8, end: 1.0).animate(
+              CurvedAnimation(parent: anim1, curve: Curves.easeOutBack),
+            ),
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+
+  void _handleTakeTest() {
+    if (!DeviceManager.isReady) {
+      showGeneralDialog(
+        context: context,
+        barrierDismissible: true,
+        barrierLabel: 'Connect Devices',
+        barrierColor: Colors.black.withOpacity(0.5),
+        transitionDuration: const Duration(milliseconds: 300),
+        pageBuilder: (context, anim1, anim2) {
+          return Center(
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                margin: const EdgeInsets.all(24),
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Colors.white.withOpacity(0.95),
+                      Colors.white.withOpacity(0.85),
+                    ],
+                  ),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(
+                    color: Colors.white.withOpacity(0.5),
+                    width: 1.5,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.tealAccent.withOpacity(0.2),
+                      blurRadius: 30,
+                      spreadRadius: 5,
+                    ),
+                  ],
+                ),
+                child: Stack(
+                  children: [
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const SizedBox(height: 8),
+                        Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.orange.withOpacity(0.1),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            Icons.bluetooth_disabled,
+                            size: 48,
+                            color: Colors.orange.shade600,
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        const Text(
+                          'Connect Devices',
+                          style: TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Please connect both footwear devices to start the test',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                        // Device status indicators
+                        Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade50,
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                            children: [
+                              _buildPopupDeviceStatus(
+                                'Left',
+                                Icons.chevron_left,
+                                DeviceManager.leftDevice != null,
+                              ),
+                              Container(
+                                width: 1,
+                                height: 50,
+                                color: Colors.grey.shade300,
+                              ),
+                              _buildPopupDeviceStatus(
+                                'Right',
+                                Icons.chevron_right,
+                                DeviceManager.rightDevice != null,
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: () {
+                              Navigator.pop(context);
+                              appShellKey.currentState?.goToAccountSetup();
+                            },
+                            icon: const Icon(
+                              Icons.bluetooth_searching,
+                              size: 20,
+                            ),
+                            label: const Text('Setup Devices'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.teal,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    // X close button
+                    Positioned(
+                      top: -8,
+                      right: -8,
+                      child: GestureDetector(
+                        onTap: () => Navigator.pop(context),
+                        child: Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.grey.shade100,
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            Icons.close,
+                            size: 20,
+                            color: Colors.grey.shade600,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+        transitionBuilder: (context, anim1, anim2, child) {
+          return FadeTransition(
+            opacity: anim1,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.8, end: 1.0).animate(
+                CurvedAnimation(parent: anim1, curve: Curves.easeOutBack),
+              ),
+              child: child,
+            ),
+          );
+        },
+      );
+    } else {
+      // Devices connected - show instruction popup with glossy background
+      showGeneralDialog(
+        context: context,
+        barrierDismissible: true,
+        barrierLabel: 'Instructions',
+        barrierColor: Colors.black.withOpacity(0.5),
+        transitionDuration: const Duration(milliseconds: 300),
+        pageBuilder: (context, anim1, anim2) {
+          return Center(
+            child: Material(
+              color: Colors.transparent,
+              child: Container(
+                margin: const EdgeInsets.all(24),
+                padding: const EdgeInsets.all(24),
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Colors.white.withOpacity(0.95),
+                      Colors.white.withOpacity(0.85),
+                    ],
+                  ),
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(
+                    color: Colors.white.withOpacity(0.5),
+                    width: 1.5,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.teal.withOpacity(0.2),
+                      blurRadius: 30,
+                      spreadRadius: 5,
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.teal.withOpacity(0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        Icons.directions_walk,
+                        size: 48,
+                        color: Colors.teal.shade600,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    const Text(
+                      'Test Instructions',
+                      style: TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      'Follow these steps for accurate results',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey.shade600,
+                      ),
+                    ),
+                    const SizedBox(height: 24),
+                    _buildGlossyInstructionItem(
+                      '1',
+                      'Wear both footwear devices',
+                      Icons.checkroom,
+                    ),
+                    _buildGlossyInstructionItem(
+                      '2',
+                      'Walk naturally for 30 seconds',
+                      Icons.directions_walk,
+                    ),
+                    _buildGlossyInstructionItem(
+                      '3',
+                      'Keep a steady pace',
+                      Icons.speed,
+                    ),
+                    _buildGlossyInstructionItem(
+                      '4',
+                      'Walk in a straight line',
+                      Icons.straighten,
+                    ),
+                    const SizedBox(height: 24),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.pop(context),
+                            style: OutlinedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              side: BorderSide(color: Colors.grey.shade300),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            child: const Text('Cancel'),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          flex: 2,
+                          child: ElevatedButton(
+                            onPressed: () {
+                              Navigator.pop(context);
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => DataCollectionPage(
+                                    leftDevice: DeviceManager.leftDevice!,
+                                    rightDevice: DeviceManager.rightDevice!,
                                   ),
-                                  duration: const Duration(seconds: 1),
                                 ),
                               );
                             },
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.teal,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            child: const Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.play_arrow, size: 20),
+                                SizedBox(width: 8),
+                                Text(
+                                  'Start Test',
+                                  style: TextStyle(fontWeight: FontWeight.bold),
+                                ),
+                              ],
+                            ),
                           ),
-                        );
-                      },
+                        ),
+                      ],
                     ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+        transitionBuilder: (context, anim1, anim2, child) {
+          return FadeTransition(
+            opacity: anim1,
+            child: ScaleTransition(
+              scale: Tween<double>(begin: 0.8, end: 1.0).animate(
+                CurvedAnimation(parent: anim1, curve: Curves.easeOutBack),
+              ),
+              child: child,
+            ),
+          );
+        },
+      );
+    }
+  }
+
+  Widget _buildGlossyInstructionItem(
+    String number,
+    String text,
+    IconData icon,
+  ) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.teal.withOpacity(0.05),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.teal.withOpacity(0.1)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 32,
+            height: 32,
+            decoration: BoxDecoration(
+              color: Colors.teal.withOpacity(0.15),
+              shape: BoxShape.circle,
+            ),
+            child: Center(
+              child: Text(
+                number,
+                style: TextStyle(
+                  color: Colors.teal.shade700,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(child: Text(text)),
+          Icon(icon, color: Colors.teal.shade400, size: 20),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDeviceIndicator(String label, bool connected) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Icon(
+          connected ? Icons.check_circle : Icons.cancel,
+          color: connected ? Colors.green : Colors.red,
+          size: 20,
+        ),
+        const SizedBox(width: 8),
+        Text('$label Footwear'),
+      ],
+    );
+  }
+
+  Widget _buildPopupDeviceStatus(String label, IconData icon, bool connected) {
+    return Column(
+      children: [
+        Container(
+          width: 50,
+          height: 50,
+          decoration: BoxDecoration(
+            color: connected ? Colors.green.shade50 : Colors.red.shade50,
+            shape: BoxShape.circle,
+            border: Border.all(
+              color: connected ? Colors.green : Colors.red,
+              width: 2,
+            ),
+          ),
+          child: Icon(
+            connected ? Icons.check : icon,
+            color: connected ? Colors.green : Colors.red,
+            size: 24,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          label,
+          style: TextStyle(
+            fontWeight: FontWeight.w600,
+            color: connected ? Colors.green.shade700 : Colors.red.shade700,
+          ),
+        ),
+        Text(
+          connected ? 'Connected' : 'Not connected',
+          style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+        ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFFE0F2F1), // Light cyan background
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const SizedBox(height: 40), // Top padding to move button down
+              // Main Take Test Button - Interactive Circular Design
+              Center(
+                child: GestureDetector(
+                  onTap: _handleTakeTest,
+                  child: Column(
+                    children: [
+                      // Outer ripple ring
+                      AnimatedBuilder(
+                        animation: _pulseController,
+                        builder: (context, child) {
+                          return Container(
+                            width: 180 + (_pulseAnimation.value - 1) * 50,
+                            height: 180 + (_pulseAnimation.value - 1) * 50,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: Colors.teal.withOpacity(
+                                  0.5 - (_pulseAnimation.value - 1) * 2,
+                                ),
+                                width: 4,
+                              ),
+                            ),
+                            child: Center(
+                              child: Container(
+                                width: 160,
+                                height: 160,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  gradient: LinearGradient(
+                                    colors: DeviceManager.isReady
+                                        ? [
+                                            Colors.teal.shade400,
+                                            Colors.teal.shade700,
+                                          ]
+                                        : [
+                                            Colors.grey.shade400,
+                                            Colors.grey.shade600,
+                                          ],
+                                    begin: Alignment.topLeft,
+                                    end: Alignment.bottomRight,
+                                  ),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: DeviceManager.isReady
+                                          ? Colors.teal.withOpacity(0.4)
+                                          : Colors.grey.withOpacity(0.3),
+                                      blurRadius: 25,
+                                      spreadRadius: 5,
+                                    ),
+                                  ],
+                                ),
+                                child: const Icon(
+                                  Icons.play_arrow_rounded,
+                                  size: 80,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 20),
+                      Text(
+                        'Start Test',
+                        style: TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                          color: DeviceManager.isReady
+                              ? Colors.teal.shade700
+                              : Colors.grey.shade600,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        DeviceManager.isReady
+                            ? 'Tap to begin your gait analysis'
+                            : 'Connect devices to start',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: Colors.grey.shade600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+
+              // Device Status Row - Clickable to setup devices
+              GestureDetector(
+                onTap: () {
+                  appShellKey.currentState?.goToAccountSetup();
+                },
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _buildDeviceCard(
+                        'Left Footwear',
+                        DeviceManager.leftDevice != null,
+                        Icons.chevron_left,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: _buildDeviceCard(
+                        'Right Footwear',
+                        DeviceManager.rightDevice != null,
+                        Icons.chevron_right,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 24),
+
+              // Reminders Section
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'Reminders',
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                  ),
+                  TextButton.icon(
+                    onPressed: _addReminder,
+                    icon: const Icon(Icons.add, size: 20),
+                    label: const Text('Add'),
+                    style: TextButton.styleFrom(foregroundColor: Colors.teal),
                   ),
                 ],
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              if (_reminders.isEmpty)
+                Container(
+                  padding: const EdgeInsets.all(24),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: Colors.grey.shade200),
+                  ),
+                  child: Center(
+                    child: Column(
+                      children: [
+                        Icon(
+                          Icons.notifications_none,
+                          size: 40,
+                          color: Colors.grey.shade400,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'No reminders set',
+                          style: TextStyle(color: Colors.grey.shade600),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(
+                          'Add a reminder to stay on track',
+                          style: TextStyle(
+                            color: Colors.grey.shade500,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              else
+                ...List.generate(_reminders.length, (index) {
+                  final reminder = _reminders[index];
+                  final timeParts = reminder['time'].split(':');
+                  final time = TimeOfDay(
+                    hour: int.parse(timeParts[0]),
+                    minute: int.parse(timeParts[1]),
+                  );
+                  final days = List<bool>.from(reminder['days']);
+                  final dayNames = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+                  final activeDays = <String>[];
+                  for (int i = 0; i < days.length; i++) {
+                    if (days[i]) activeDays.add(dayNames[i]);
+                  }
+
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.grey.shade200),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.alarm, color: Colors.teal),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                time.format(context),
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              Text(
+                                activeDays.join(', '),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        IconButton(
+                          icon: Icon(
+                            Icons.edit_outlined,
+                            color: Colors.teal.shade400,
+                          ),
+                          onPressed: () => _editReminder(index),
+                        ),
+                        IconButton(
+                          icon: Icon(
+                            Icons.delete_outline,
+                            color: Colors.red.shade300,
+                          ),
+                          onPressed: () => _deleteReminder(index),
+                        ),
+                      ],
+                    ),
+                  );
+                }),
+              const SizedBox(height: 20),
+            ],
+          ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildDeviceCard(String label, bool connected, IconData icon) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: connected ? Colors.green.shade50 : Colors.red.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: connected ? Colors.green.shade200 : Colors.red.shade200,
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: connected ? Colors.green : Colors.red),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
+                ),
+                Text(
+                  connected ? 'Connected' : 'Disconnected',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: connected
+                        ? Colors.green.shade700
+                        : Colors.red.shade700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInstructionItem(String number, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Container(
+            width: 24,
+            height: 24,
+            decoration: BoxDecoration(
+              color: Colors.teal.shade100,
+              shape: BoxShape.circle,
+            ),
+            child: Center(
+              child: Text(
+                number,
+                style: TextStyle(
+                  color: Colors.teal.shade700,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Text(text),
+        ],
       ),
     );
   }
@@ -896,6 +3559,8 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
   StreamSubscription<String>? _rightSub;
   StreamSubscription<BluetoothConnectionState>? _leftConnSub;
   StreamSubscription<BluetoothConnectionState>? _rightConnSub;
+  Timer? _timer;
+  int _elapsedSeconds = 0;
 
   bool collecting = false;
   final List<ImuSample> leftSamples = [];
@@ -906,7 +3571,6 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
   @override
   void initState() {
     super.initState();
-    print('🟢 DataCollectionPage initState');
     _discoverChars();
 
     _leftConnSub = widget.leftDevice.connectionState.listen((state) {
@@ -934,10 +3598,8 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
   }
 
   Future<void> _discoverChars() async {
-    print('🔍 Discovering characteristics...');
     _leftChar = await _findNotifyChar(widget.leftDevice);
     _rightChar = await _findNotifyChar(widget.rightDevice);
-    print('✓ Discovery complete');
     if (mounted) setState(() {});
   }
 
@@ -956,10 +3618,7 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
     return null;
   }
 
-  // ✅ FIXED: Clean start - no delays, no waiting!
   void _startCollecting() async {
-    print('🔵 _startCollecting called');
-
     if (_leftChar == null || _rightChar == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -970,7 +3629,6 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
       return;
     }
 
-    // Clear everything
     leftSamples.clear();
     rightSamples.clear();
     _latestLeft = null;
@@ -979,50 +3637,39 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
 
     if (mounted) setState(() {});
 
-    print('📡 Enabling notifications...');
-
-    // ✅ FIX 1: Request HIGH PRIORITY connection for both devices
+    // Request HIGH PRIORITY connection for both devices
     try {
-      print('🚀 Requesting high priority connection...');
       await widget.leftDevice.requestConnectionPriority(
         connectionPriorityRequest: ConnectionPriority.high,
       );
       await widget.rightDevice.requestConnectionPriority(
         connectionPriorityRequest: ConnectionPriority.high,
       );
-      print('✅ High priority enabled');
     } catch (e) {
-      print('⚠️ Priority request failed (non-fatal): $e');
+      // Priority request failed (non-fatal)
     }
 
-    // ✅ FIX 2: Request larger MTU (Maximum Transmission Unit)
+    // Request larger MTU for better throughput
     try {
-      print('📦 Requesting MTU increase...');
       await widget.leftDevice.requestMtu(512);
       await widget.rightDevice.requestMtu(512);
-      print('✅ MTU increased');
     } catch (e) {
-      print('⚠️ MTU request failed (non-fatal): $e');
+      // MTU request failed (non-fatal)
     }
 
     // Small delay to let Android BLE stack adjust
-    await Future.delayed(const Duration(milliseconds: 100));
+    await Future.delayed(const Duration(milliseconds: 500));
 
     try {
-      // Enable both simultaneously
       await _leftChar!.setNotifyValue(true);
       await _rightChar!.setNotifyValue(true);
     } catch (e) {
-      print('❌ setNotify error: $e');
+      // setNotify error - will be handled by empty data check
     }
 
-    print('✓ Notifications enabled');
-
-    // Cancel old subscriptions
     await _leftSub?.cancel();
     await _rightSub?.cancel();
 
-    // Start listening
     final leftLines = _leftChar!.onValueReceived
         .map((b) => utf8.decode(b, allowMalformed: true))
         .transform(const LineSplitter());
@@ -1033,15 +3680,23 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
 
     _leftSub = leftLines.listen(
       (l) => _parseCsvLine(l, isLeft: true),
-      onError: (e) => print('left notify err: $e'),
+      onError: (e) {},
     );
 
     _rightSub = rightLines.listen(
       (l) => _parseCsvLine(l, isLeft: false),
-      onError: (e) => print('right notify err: $e'),
+      onError: (e) {},
     );
 
-    print('✅ Collecting started - listening to both devices!');
+    // Start timer
+    _elapsedSeconds = 0;
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted && collecting) {
+        setState(() {
+          _elapsedSeconds++;
+        });
+      }
+    });
 
     if (mounted) {
       ScaffoldMessenger.of(
@@ -1058,10 +3713,6 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
 
     final p = trimmed.split(',');
     if (p.length < 12) {
-      // ✅ ADD THIS: Print invalid packets
-      print(
-        '⚠️ Invalid packet from ${isLeft ? "LEFT" : "RIGHT"}: ${p.length} fields',
-      );
       return;
     }
 
@@ -1086,13 +3737,9 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
     if (isLeft) {
       leftSamples.add(s);
       _latestLeft = s;
-      // ✅ CHANGE THIS: Print EVERY sample (not just every 50)
-      print('📥 LEFT: ${leftSamples.length} samples');
     } else {
       rightSamples.add(s);
       _latestRight = s;
-      // ✅ CHANGE THIS: Print EVERY sample (not just every 50)
-      print('📥 RIGHT: ${rightSamples.length} samples');
     }
 
     // Update UI every 50 samples
@@ -1103,11 +3750,7 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
   }
 
   void _stopCollecting() async {
-    print('═════════════════════════════════════');
-    print('🛑 STOP BUTTON CLICKED');
-    print('═════════════════════════════════════');
-
-    // ✅ FIX 1: Show "Generating Report" dialog IMMEDIATELY
+    // Show "Generating Report" dialog IMMEDIATELY
     if (mounted) {
       showDialog(
         context: context,
@@ -1115,6 +3758,9 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
         builder: (context) => PopScope(
           canPop: false,
           child: Dialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
             child: Padding(
               padding: const EdgeInsets.all(24),
               child: Column(
@@ -1139,43 +3785,34 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
       );
     }
 
-    // Give UI time to render the dialog
     await Future.delayed(const Duration(milliseconds: 100));
 
     collecting = false;
+    _timer?.cancel();
 
-    print('🔄 Canceling subscriptions...');
     await _leftSub?.cancel();
     await _rightSub?.cancel();
 
-    print('⏸️ Disabling notifications...');
     try {
       await _leftChar
           ?.setNotifyValue(false)
           .timeout(const Duration(seconds: 1));
-      print('✅ LEFT notifications disabled');
     } catch (e) {
-      print('⚠️ LEFT disable timeout: $e');
+      // Timeout is acceptable
     }
 
     try {
       await _rightChar
           ?.setNotifyValue(false)
           .timeout(const Duration(seconds: 1));
-      print('✅ RIGHT notifications disabled');
     } catch (e) {
-      print('⚠️ RIGHT disable timeout: $e');
+      // Timeout is acceptable
     }
-
-    print('📊 Collection stopped');
-    print('   Left samples: ${leftSamples.length}');
-    print('   Right samples: ${rightSamples.length}');
 
     // Check if we have data
     if (leftSamples.isEmpty || rightSamples.isEmpty) {
-      print('❌ No data collected');
       if (mounted) {
-        Navigator.pop(context); // Close dialog
+        Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('No data collected. Please try again.'),
@@ -1186,8 +3823,8 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
       return;
     }
 
-    // ✅ FIX 2: Limit samples to prevent analyzer slowdown
-    const maxSamples = 500; // ~5 seconds at 100Hz
+    // Limit samples to prevent analyzer slowdown
+    const maxSamples = 500;
 
     final limitedLeft = leftSamples.length > maxSamples
         ? leftSamples.sublist(leftSamples.length - maxSamples)
@@ -1197,15 +3834,6 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
         ? rightSamples.sublist(rightSamples.length - maxSamples)
         : rightSamples;
 
-    print(
-      '📊 Using samples: LEFT=${limitedLeft.length}, RIGHT=${limitedRight.length}',
-    );
-
-    print('🔬 Starting analysis...');
-    print(
-      '   Analyzing ${limitedLeft.length} left + ${limitedRight.length} right samples...',
-    );
-
     try {
       final analyzer = GaitAnalyzer();
       final result = analyzer.analyze(
@@ -1214,12 +3842,9 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
         envelopeWindow: 50,
       );
 
-      print('✅ Analysis complete!');
-
       if (result.containsKey('error')) {
-        print('❌ Analysis error: ${result['error']}');
         if (mounted) {
-          Navigator.pop(context); // Close dialog
+          Navigator.pop(context);
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text('Analysis error: ${result['error']}'),
@@ -1230,14 +3855,13 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
         return;
       }
 
-      if (!mounted) {
-        print('⚠️ Widget not mounted');
-        return;
-      }
+      // Save test to history
+      TestHistoryManager.addTest(result);
 
-      Navigator.pop(context); // Close "Generating Report" dialog
+      if (!mounted) return;
 
-      print('📄 Navigating to ResultsScreen...');
+      Navigator.pop(context);
+
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
@@ -1248,15 +3872,9 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
           ),
         ),
       );
-
-      print('✅ Navigation successful');
-    } catch (e, stackTrace) {
-      print('❌ ERROR: $e');
-      print(
-        'Stack trace: ${stackTrace.toString().split('\n').take(5).join('\n')}',
-      );
+    } catch (e) {
       if (mounted) {
-        Navigator.pop(context); // Close dialog
+        Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error: ${e.toString()}'),
@@ -1343,6 +3961,7 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
 
   @override
   void dispose() {
+    _timer?.cancel();
     _leftSub?.cancel();
     _rightSub?.cancel();
     _leftConnSub?.cancel();
@@ -1350,15 +3969,8 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
     super.dispose();
   }
 
-  // ... [Keep your existing build(), _liveCard(), etc. - NO CHANGES TO UI!]
-
   @override
   Widget build(BuildContext context) {
-    print('🎨 Building DataCollectionPage UI');
-    print('   collecting: $collecting');
-    print('   _leftChar: $_leftChar');
-    print('   _rightChar: $_rightChar');
-
     return PopScope(
       canPop: !collecting,
       onPopInvoked: (didPop) async {
@@ -1434,10 +4046,40 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
 
                 const SizedBox(height: 12),
 
-                // Sample count display
+                // Timer and sample count display
                 if (collecting) ...[
+                  // Timer display
                   Container(
-                    padding: const EdgeInsets.all(8),
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 16,
+                      horizontal: 24,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.teal.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: Colors.teal.shade200),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Icon(Icons.timer, color: Colors.teal.shade600),
+                        const SizedBox(width: 12),
+                        Text(
+                          '${(_elapsedSeconds ~/ 60).toString().padLeft(2, '0')}:${(_elapsedSeconds % 60).toString().padLeft(2, '0')}',
+                          style: TextStyle(
+                            fontSize: 32,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.teal.shade700,
+                            fontFamily: 'monospace',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  // Sample counts
+                  Container(
+                    padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
                       color: Colors.blue.shade50,
                       borderRadius: BorderRadius.circular(8),
@@ -1445,13 +4087,15 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                       children: [
-                        Text(
-                          'LEFT: ${leftSamples.length} samples',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        _sampleCountChip(
+                          'LEFT',
+                          leftSamples.length,
+                          Colors.blue,
                         ),
-                        Text(
-                          'RIGHT: ${rightSamples.length} samples',
-                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        _sampleCountChip(
+                          'RIGHT',
+                          rightSamples.length,
+                          Colors.orange,
                         ),
                       ],
                     ),
@@ -1541,6 +4185,34 @@ class _DataCollectionPageState extends State<DataCollectionPage> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _sampleCountChip(String label, int count, Color color) {
+    return Column(
+      children: [
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: color,
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          '$count',
+          style: TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.bold,
+            color: color,
+          ),
+        ),
+        Text(
+          'samples',
+          style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+        ),
+      ],
     );
   }
 }
@@ -1686,15 +4358,20 @@ class GaitAnalyzer {
   }
 
   static List<double> _interp(List<double> t, List<double> v, List<double> tq) {
-    if (t.isEmpty) return List.filled(tq.length, 0.0);
+    if (t.isEmpty || t.length < 2) return List.filled(tq.length, 0.0);
     final out = List<double>.filled(tq.length, 0.0);
     int j = 0;
     for (int i = 0; i < tq.length; i++) {
       while (j < t.length - 2 && t[j + 1] < tq[i]) j++;
       final t0 = t[j], t1 = t[j + 1];
       final v0 = v[j], v1 = v[j + 1];
-      final frac = (tq[i] - t0) / (t1 - t0);
-      out[i] = v0 + frac * (v1 - v0);
+      final denom = t1 - t0;
+      if (denom == 0) {
+        out[i] = v0;
+      } else {
+        final frac = (tq[i] - t0) / denom;
+        out[i] = v0 + frac * (v1 - v0);
+      }
     }
     return out;
   }
@@ -2128,20 +4805,40 @@ class _AccountPageState extends State<AccountPage> {
         child: Column(
           children: [
             Container(
-              color: Colors.teal.shade50,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              margin: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(16),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.05),
+                    blurRadius: 10,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
               child: Row(
                 children: [
-                  IconButton(
-                    icon: const Icon(Icons.arrow_back),
-                    onPressed: resetToHome,
-                    visualDensity: VisualDensity.compact,
-                    iconSize: 20,
+                  Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: resetToHome,
+                      borderRadius: BorderRadius.circular(12),
+                      child: Container(
+                        padding: const EdgeInsets.all(8),
+                        child: Icon(
+                          Icons.arrow_back_ios_new_rounded,
+                          size: 20,
+                          color: Colors.teal.shade600,
+                        ),
+                      ),
+                    ),
                   ),
-                  const SizedBox(width: 4),
+                  const SizedBox(width: 8),
                   const Text(
                     'Setup Device',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
                   ),
                 ],
               ),
@@ -2192,41 +4889,526 @@ class _AccountPageState extends State<AccountPage> {
     }
 
     // Home view (default)
-    return ListView(
-      padding: const EdgeInsets.all(16),
+    return Scaffold(
+      backgroundColor: const Color(0xFFE0F2F1), // Light cyan background
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              // User Profile Header - Curved bubble like gait score card
+              GestureDetector(
+                onTap: openProfile,
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(20),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [Colors.teal.shade400, Colors.teal.shade600],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.teal.withOpacity(0.3),
+                        blurRadius: 15,
+                        offset: const Offset(0, 5),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      // Profile Picture
+                      Stack(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(3),
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white, width: 3),
+                            ),
+                            child: CircleAvatar(
+                              radius: 42,
+                              backgroundColor: Colors.white,
+                              child: Icon(
+                                Icons.person,
+                                size: 48,
+                                color: Colors.teal.shade400,
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            bottom: 0,
+                            right: 0,
+                            child: Container(
+                              padding: const EdgeInsets.all(6),
+                              decoration: BoxDecoration(
+                                color: Colors.white,
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: Colors.black.withOpacity(0.2),
+                                    blurRadius: 4,
+                                  ),
+                                ],
+                              ),
+                              child: Icon(
+                                Icons.edit,
+                                size: 14,
+                                color: Colors.teal.shade600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(width: 20),
+                      // Name and greeting
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Santhosh',
+                              style: TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              'Tap to edit profile',
+                              style: TextStyle(
+                                fontSize: 13,
+                                color: Colors.white.withOpacity(0.85),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      // Arrow indicator
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.2),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(
+                          Icons.arrow_forward_ios,
+                          color: Colors.white,
+                          size: 18,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              // Menu Items - Expanded to fill remaining space
+              Expanded(
+                child: Column(
+                  children: [
+                    _accountCard(
+                      icon: Icons.medical_services_outlined,
+                      title: 'Doctor\'s Details',
+                      subtitle: 'Your assigned healthcare provider',
+                      color: Colors.purple,
+                      onTap: openDoctorProfile,
+                    ),
+                    _accountCard(
+                      icon: Icons.bluetooth_connected,
+                      title: 'Setup Device',
+                      subtitle: 'Connect device',
+                      color: Colors.teal,
+                      onTap: openSetupDevice,
+                      showStatus: true,
+                    ),
+                    _accountCard(
+                      icon: Icons.help_outline,
+                      title: 'FAQs',
+                      subtitle: 'Frequently asked questions',
+                      color: Colors.orange,
+                      onTap: openFAQs,
+                    ),
+                    _accountCard(
+                      icon: Icons.info_outline,
+                      title: 'About App',
+                      subtitle: 'Version 1.0.0',
+                      color: Colors.grey,
+                      onTap: () {
+                        showGeneralDialog(
+                          context: context,
+                          barrierDismissible: true,
+                          barrierLabel: 'About',
+                          barrierColor: Colors.black.withOpacity(0.5),
+                          transitionDuration: const Duration(milliseconds: 300),
+                          pageBuilder: (context, anim1, anim2) {
+                            return Center(
+                              child: Material(
+                                color: Colors.transparent,
+                                child: Container(
+                                  margin: const EdgeInsets.all(24),
+                                  padding: const EdgeInsets.all(24),
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      begin: Alignment.topLeft,
+                                      end: Alignment.bottomRight,
+                                      colors: [
+                                        Colors.white.withOpacity(0.95),
+                                        Colors.white.withOpacity(0.85),
+                                      ],
+                                    ),
+                                    borderRadius: BorderRadius.circular(24),
+                                    border: Border.all(
+                                      color: Colors.white.withOpacity(0.5),
+                                      width: 1.5,
+                                    ),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.teal.withOpacity(0.2),
+                                        blurRadius: 30,
+                                        spreadRadius: 5,
+                                      ),
+                                    ],
+                                  ),
+                                  child: Column(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Container(
+                                        padding: const EdgeInsets.all(16),
+                                        decoration: BoxDecoration(
+                                          gradient: LinearGradient(
+                                            colors: [
+                                              Colors.teal.shade400,
+                                              Colors.teal.shade600,
+                                            ],
+                                            begin: Alignment.topLeft,
+                                            end: Alignment.bottomRight,
+                                          ),
+                                          shape: BoxShape.circle,
+                                          boxShadow: [
+                                            BoxShadow(
+                                              color: Colors.teal.withOpacity(
+                                                0.3,
+                                              ),
+                                              blurRadius: 15,
+                                              spreadRadius: 2,
+                                            ),
+                                          ],
+                                        ),
+                                        child: const Icon(
+                                          Icons.directions_walk,
+                                          size: 48,
+                                          color: Colors.white,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 20),
+                                      const Text(
+                                        'SafeStep',
+                                        style: TextStyle(
+                                          fontSize: 24,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 4),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 12,
+                                          vertical: 4,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: Colors.teal.shade50,
+                                          borderRadius: BorderRadius.circular(
+                                            12,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          'Version 1.0.0',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            color: Colors.teal.shade700,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                      ),
+                                      const SizedBox(height: 20),
+                                      Text(
+                                        'SafeStep is a smart gait analysis application that helps monitor and improve your walking patterns for better rehabilitation outcomes.',
+                                        textAlign: TextAlign.center,
+                                        style: TextStyle(
+                                          fontSize: 14,
+                                          color: Colors.grey.shade600,
+                                          height: 1.5,
+                                        ),
+                                      ),
+                                      const SizedBox(height: 24),
+                                      Container(
+                                        padding: const EdgeInsets.all(16),
+                                        decoration: BoxDecoration(
+                                          color: Colors.grey.shade50,
+                                          borderRadius: BorderRadius.circular(
+                                            12,
+                                          ),
+                                        ),
+                                        child: Column(
+                                          children: [
+                                            _aboutInfoRow(
+                                              Icons.code,
+                                              'Developed by',
+                                              'SafeStep Team',
+                                            ),
+                                            const SizedBox(height: 12),
+                                            _aboutInfoRow(
+                                              Icons.calendar_today,
+                                              'Released',
+                                              'January 2026',
+                                            ),
+                                            const SizedBox(height: 12),
+                                            _aboutInfoRow(
+                                              Icons.phone_android,
+                                              'Platform',
+                                              'Android & iOS',
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                      const SizedBox(height: 24),
+                                      SizedBox(
+                                        width: double.infinity,
+                                        child: ElevatedButton(
+                                          onPressed: () =>
+                                              Navigator.pop(context),
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor: Colors.teal,
+                                            foregroundColor: Colors.white,
+                                            padding: const EdgeInsets.symmetric(
+                                              vertical: 14,
+                                            ),
+                                            shape: RoundedRectangleBorder(
+                                              borderRadius:
+                                                  BorderRadius.circular(12),
+                                            ),
+                                          ),
+                                          child: const Text('Close'),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            );
+                          },
+                          transitionBuilder: (context, anim1, anim2, child) {
+                            return FadeTransition(
+                              opacity: anim1,
+                              child: ScaleTransition(
+                                scale: Tween<double>(begin: 0.8, end: 1.0)
+                                    .animate(
+                                      CurvedAnimation(
+                                        parent: anim1,
+                                        curve: Curves.easeOutBack,
+                                      ),
+                                    ),
+                                child: child,
+                              ),
+                            );
+                          },
+                        );
+                      },
+                    ),
+                    const Spacer(),
+                    // Logout Button
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: () {
+                          showDialog(
+                            context: context,
+                            builder: (context) => AlertDialog(
+                              title: const Text('Logout'),
+                              content: const Text(
+                                'Are you sure you want to logout?',
+                              ),
+                              actions: [
+                                TextButton(
+                                  onPressed: () => Navigator.pop(context),
+                                  child: const Text('Cancel'),
+                                ),
+                                ElevatedButton(
+                                  onPressed: () {
+                                    Navigator.pop(context);
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                          'Logged out successfully',
+                                        ),
+                                        backgroundColor: Colors.teal,
+                                      ),
+                                    );
+                                  },
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.red,
+                                    foregroundColor: Colors.white,
+                                  ),
+                                  child: const Text('Logout'),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.logout, color: Colors.red),
+                        label: const Text(
+                          'Logout',
+                          style: TextStyle(color: Colors.red),
+                        ),
+                        style: OutlinedButton.styleFrom(
+                          side: const BorderSide(color: Colors.red),
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _quickStat(String value, String label) {
+    return Column(
       children: [
-        _accountTile(
-          icon: Icons.person_outline,
-          title: 'Profile',
-          onTap: openProfile,
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.bold,
+            color: Colors.white,
+          ),
         ),
-        _accountTile(
-          icon: Icons.medical_information_outlined,
-          title: 'Doctor\'s Details',
-          onTap: openDoctorProfile,
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: TextStyle(fontSize: 12, color: Colors.white.withOpacity(0.8)),
         ),
-        _accountTile(
-          icon: Icons.bluetooth_connected,
-          title: 'Setup Device',
-          onTap: openSetupDevice,
-        ),
-        _accountTile(icon: Icons.help_outline, title: 'FAQs', onTap: openFAQs),
       ],
     );
   }
 
-  Widget _accountTile({
+  Widget _aboutInfoRow(IconData icon, String label, String value) {
+    return Row(
+      children: [
+        Icon(icon, size: 18, color: Colors.teal.shade600),
+        const SizedBox(width: 12),
+        Text(
+          label,
+          style: TextStyle(fontSize: 13, color: Colors.grey.shade600),
+        ),
+        const Spacer(),
+        Text(
+          value,
+          style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+        ),
+      ],
+    );
+  }
+
+  Widget _accountCard({
     required IconData icon,
     required String title,
+    required String subtitle,
+    required Color color,
     required VoidCallback onTap,
+    bool showStatus = false,
   }) {
-    return Card(
+    return Container(
       margin: const EdgeInsets.only(bottom: 12),
-      child: ListTile(
-        leading: Icon(icon, color: Colors.teal),
-        title: Text(title),
-        trailing: const Icon(Icons.chevron_right),
-        onTap: onTap,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(16),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: color.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(icon, color: color, size: 24),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Colors.grey.shade600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (showStatus)
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: DeviceManager.isReady
+                          ? Colors.green.shade50
+                          : Colors.orange.shade50,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(
+                      DeviceManager.isReady ? 'Connected' : 'Not Connected',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: DeviceManager.isReady
+                            ? Colors.green.shade700
+                            : Colors.orange.shade700,
+                      ),
+                    ),
+                  ),
+                const SizedBox(width: 8),
+                Icon(Icons.chevron_right, color: Colors.grey.shade400),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -2249,22 +5431,22 @@ class _ProfilePageState extends State<ProfilePage> {
 
   // Controllers for text fields
   final TextEditingController _nameController = TextEditingController(
-    text: 'John Doe',
+    text: 'Santhosh',
   );
   final TextEditingController _emailController = TextEditingController(
-    text: 'johndoe@example.com',
+    text: 'santhosh@example.com',
   );
   final TextEditingController _phoneController = TextEditingController(
     text: '+91 9876543210',
   );
   final TextEditingController _ageController = TextEditingController(
-    text: '45',
+    text: '23',
   );
   final TextEditingController _genderController = TextEditingController(
     text: 'Male',
   );
   final TextEditingController _weightController = TextEditingController(
-    text: '75 kg',
+    text: '65 kg',
   );
   final TextEditingController _heightController = TextEditingController(
     text: '175 cm',
@@ -2292,137 +5474,563 @@ class _ProfilePageState extends State<ProfilePage> {
     setState(() {
       _isEditing = false;
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Profile saved successfully'),
-        duration: Duration(seconds: 2),
-        backgroundColor: Colors.green,
+    _showProfileSnackBar('Profile saved successfully');
+  }
+
+  OverlayEntry? _snackBarOverlay;
+
+  void _showProfileSnackBar(String message) {
+    _snackBarOverlay?.remove();
+    _snackBarOverlay = null;
+
+    late OverlayEntry overlayEntry;
+
+    overlayEntry = OverlayEntry(
+      builder: (context) => _ProfileSnackBar(
+        message: message,
+        onDismiss: () {
+          overlayEntry.remove();
+          _snackBarOverlay = null;
+        },
       ),
     );
+
+    _snackBarOverlay = overlayEntry;
+    Overlay.of(context).insert(overlayEntry);
+
+    Future.delayed(const Duration(milliseconds: 2500), () {
+      if (_snackBarOverlay == overlayEntry) {
+        overlayEntry.remove();
+        _snackBarOverlay = null;
+      }
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      color: Colors.white,
-      child: Column(
-        children: [
-          // Header
-          Container(
-            color: Colors.teal.shade50,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Row(
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.arrow_back),
-                  onPressed: widget.onBack,
-                  visualDensity: VisualDensity.compact,
-                  iconSize: 20,
-                ),
-                const SizedBox(width: 4),
-                const Text(
-                  'Profile',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                ),
-                const Spacer(),
-                IconButton(
-                  icon: Icon(_isEditing ? Icons.close : Icons.edit_outlined),
-                  onPressed: _toggleEdit,
-                  iconSize: 20,
-                  color: _isEditing ? Colors.red : Colors.black,
-                ),
-              ],
-            ),
-          ),
-          // Content
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
-              child: Column(
+    return Scaffold(
+      backgroundColor: const Color(0xFFE0F2F1),
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Header bar
+            Container(
+              margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.05),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Row(
                 children: [
-                  const SizedBox(height: 16),
-                  // Profile photo placeholder
-                  CircleAvatar(
-                    radius: 50,
-                    backgroundColor: Colors.teal.shade100,
-                    child: Icon(
-                      Icons.person,
-                      size: 60,
-                      color: Colors.teal.shade700,
+                  Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      onTap: widget.onBack,
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        padding: const EdgeInsets.all(6),
+                        child: Icon(
+                          Icons.arrow_back_ios_new_rounded,
+                          size: 18,
+                          color: Colors.teal.shade600,
+                        ),
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 24),
-                  _profileField('Name', _nameController),
-                  _profileField('Email', _emailController),
-                  _profileField('Phone', _phoneController),
-                  _profileField('Age', _ageController),
-                  _profileField('Gender', _genderController),
-                  _profileField('Weight', _weightController),
-                  _profileField('Height', _heightController),
-                  const SizedBox(height: 24),
-                  SizedBox(
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: _isEditing ? _saveProfile : null,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _isEditing ? Colors.teal : Colors.grey,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        disabledBackgroundColor: Colors.grey.shade300,
-                        disabledForegroundColor: Colors.grey.shade600,
+                  const SizedBox(width: 4),
+                  const Text(
+                    'Profile',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                ],
+              ),
+            ),
+            // Content
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  children: [
+                    // Profile Header Card
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(20),
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: [Colors.teal.shade400, Colors.teal.shade600],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                        ),
+                        borderRadius: BorderRadius.circular(20),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.teal.withOpacity(0.3),
+                            blurRadius: 15,
+                            offset: const Offset(0, 5),
+                          ),
+                        ],
                       ),
-                      child: const Text('Save'),
+                      child: Column(
+                        children: [
+                          Stack(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(4),
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: Colors.white,
+                                    width: 3,
+                                  ),
+                                ),
+                                child: CircleAvatar(
+                                  radius: 45,
+                                  backgroundColor: Colors.white,
+                                  child: Icon(
+                                    Icons.person,
+                                    size: 50,
+                                    color: Colors.teal.shade400,
+                                  ),
+                                ),
+                              ),
+                              if (_isEditing)
+                                Positioned(
+                                  bottom: 0,
+                                  right: 0,
+                                  child: Container(
+                                    padding: const EdgeInsets.all(6),
+                                    decoration: BoxDecoration(
+                                      color: Colors.white,
+                                      shape: BoxShape.circle,
+                                      boxShadow: [
+                                        BoxShadow(
+                                          color: Colors.black.withOpacity(0.2),
+                                          blurRadius: 4,
+                                        ),
+                                      ],
+                                    ),
+                                    child: Icon(
+                                      Icons.camera_alt,
+                                      size: 16,
+                                      color: Colors.teal.shade600,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            _nameController.text,
+                            style: const TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _emailController.text,
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: Colors.white.withOpacity(0.9),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          GestureDetector(
+                            onTap: _toggleEdit,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 20,
+                                vertical: 8,
+                              ),
+                              decoration: BoxDecoration(
+                                color: _isEditing
+                                    ? Colors.red.withOpacity(0.2)
+                                    : Colors.white.withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(20),
+                                border: Border.all(
+                                  color: _isEditing
+                                      ? Colors.red.shade200
+                                      : Colors.white.withOpacity(0.5),
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    _isEditing ? Icons.close : Icons.edit,
+                                    size: 16,
+                                    color: _isEditing
+                                        ? Colors.red.shade100
+                                        : Colors.white,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    _isEditing
+                                        ? 'Cancel Editing'
+                                        : 'Edit Profile',
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      color: _isEditing
+                                          ? Colors.red.shade100
+                                          : Colors.white,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    // Personal Info Section
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.05),
+                            blurRadius: 10,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.person_outline,
+                                color: Colors.teal.shade600,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 8),
+                              const Text(
+                                'Personal Information',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          _modernProfileField(
+                            'Name',
+                            _nameController,
+                            Icons.badge_outlined,
+                          ),
+                          _modernProfileField(
+                            'Phone',
+                            _phoneController,
+                            Icons.phone_outlined,
+                          ),
+                          _modernProfileField(
+                            'Age',
+                            _ageController,
+                            Icons.cake_outlined,
+                          ),
+                          _modernProfileField(
+                            'Gender',
+                            _genderController,
+                            Icons.wc_outlined,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    // Health Info Section
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(16),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.05),
+                            blurRadius: 10,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.monitor_heart_outlined,
+                                color: Colors.teal.shade600,
+                                size: 20,
+                              ),
+                              const SizedBox(width: 8),
+                              const Text(
+                                'Health Information',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 16),
+                          _modernProfileField(
+                            'Weight',
+                            _weightController,
+                            Icons.fitness_center_outlined,
+                          ),
+                          _modernProfileField(
+                            'Height',
+                            _heightController,
+                            Icons.height_outlined,
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    // Save Button
+                    if (_isEditing)
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: _saveProfile,
+                          icon: const Icon(Icons.check, size: 20),
+                          label: const Text('Save Changes'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.teal,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: 16),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _modernProfileField(
+    String label,
+    TextEditingController controller,
+    IconData icon,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        decoration: BoxDecoration(
+          color: _isEditing ? Colors.teal.shade50 : Colors.grey.shade50,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: _isEditing ? Colors.teal.shade200 : Colors.grey.shade200,
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              icon,
+              size: 20,
+              color: _isEditing ? Colors.teal.shade600 : Colors.grey.shade500,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.grey.shade600,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  TextField(
+                    controller: controller,
+                    enabled: _isEditing,
+                    style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
+                      color: _isEditing ? Colors.black : Colors.grey.shade700,
+                    ),
+                    decoration: const InputDecoration(
+                      border: InputBorder.none,
+                      isDense: true,
+                      contentPadding: EdgeInsets.symmetric(vertical: 4),
                     ),
                   ),
                 ],
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
+}
 
-  Widget _profileField(String label, TextEditingController controller) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: const TextStyle(
-              fontSize: 14,
-              color: Colors.grey,
-              fontWeight: FontWeight.w500,
+// Profile Snackbar Widget
+class _ProfileSnackBar extends StatefulWidget {
+  final String message;
+  final VoidCallback onDismiss;
+
+  const _ProfileSnackBar({required this.message, required this.onDismiss});
+
+  @override
+  State<_ProfileSnackBar> createState() => _ProfileSnackBarState();
+}
+
+class _ProfileSnackBarState extends State<_ProfileSnackBar>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<Offset> _slideAnimation;
+  late Animation<double> _fadeAnimation;
+  Offset _dragOffset = Offset.zero;
+  bool _isDragging = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 250),
+    );
+    _slideAnimation = Tween<Offset>(
+      begin: const Offset(0, 1),
+      end: Offset.zero,
+    ).animate(CurvedAnimation(parent: _controller, curve: Curves.easeOut));
+    _fadeAnimation = Tween<double>(begin: 0, end: 1).animate(_controller);
+    _controller.forward();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _dismiss() {
+    _controller.reverse().then((_) => widget.onDismiss());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      left: 16,
+      right: 16,
+      bottom: 16,
+      child: FadeTransition(
+        opacity: _fadeAnimation,
+        child: SlideTransition(
+          position: _slideAnimation,
+          child: GestureDetector(
+            onPanStart: (_) => setState(() => _isDragging = true),
+            onPanUpdate: (details) {
+              setState(() {
+                _dragOffset += details.delta;
+              });
+            },
+            onPanEnd: (details) {
+              if (_dragOffset.dx.abs() > 80 || _dragOffset.dy.abs() > 40) {
+                _dismiss();
+              } else {
+                setState(() {
+                  _dragOffset = Offset.zero;
+                  _isDragging = false;
+                });
+              }
+            },
+            child: Transform.translate(
+              offset: _dragOffset,
+              child: Opacity(
+                opacity: _isDragging
+                    ? (1 - (_dragOffset.distance / 200).clamp(0, 0.5))
+                    : 1,
+                child: Material(
+                  color: Colors.transparent,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 12,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.green,
+                      borderRadius: BorderRadius.circular(16),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.green.withOpacity(0.4),
+                          blurRadius: 12,
+                          offset: const Offset(0, 4),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.2),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Icon(
+                            Icons.check_circle,
+                            color: Colors.white,
+                            size: 20,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Text(
+                            widget.message,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                        GestureDetector(
+                          onTap: _dismiss,
+                          child: Container(
+                            padding: const EdgeInsets.all(4),
+                            child: const Icon(
+                              Icons.close,
+                              color: Colors.white70,
+                              size: 18,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
             ),
           ),
-          const SizedBox(height: 8),
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            decoration: BoxDecoration(
-              color: _isEditing ? Colors.white : Colors.grey.shade100,
-              border: Border.all(
-                color: _isEditing ? Colors.teal : Colors.grey.shade300,
-              ),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: TextField(
-              controller: controller,
-              enabled: _isEditing,
-              style: TextStyle(
-                fontSize: 16,
-                color: _isEditing ? Colors.black : Colors.grey.shade600,
-              ),
-              decoration: const InputDecoration(
-                border: InputBorder.none,
-                isDense: true,
-                contentPadding: EdgeInsets.symmetric(vertical: 14),
-              ),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -2439,20 +6047,40 @@ class DoctorProfilePage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: Colors.white,
+      color: const Color(0xFFE0F2F1),
       child: Column(
         children: [
           // Header
           Container(
-            color: Colors.teal.shade50,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.05),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
             child: Row(
               children: [
-                IconButton(
-                  icon: const Icon(Icons.arrow_back),
-                  onPressed: onBack,
-                  visualDensity: VisualDensity.compact,
-                  iconSize: 20,
+                Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: onBack,
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      child: Icon(
+                        Icons.arrow_back_ios_new_rounded,
+                        size: 18,
+                        color: Colors.teal.shade600,
+                      ),
+                    ),
+                  ),
                 ),
                 const SizedBox(width: 4),
                 const Text(
@@ -2684,20 +6312,40 @@ class FAQsPage extends StatelessWidget {
     ];
 
     return Container(
-      color: Colors.white,
+      color: const Color(0xFFE0F2F1),
       child: Column(
         children: [
           // Header
           Container(
-            color: Colors.teal.shade50,
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.05),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
             child: Row(
               children: [
-                IconButton(
-                  icon: const Icon(Icons.arrow_back),
-                  onPressed: onBack,
-                  visualDensity: VisualDensity.compact,
-                  iconSize: 20,
+                Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: onBack,
+                    borderRadius: BorderRadius.circular(8),
+                    child: Container(
+                      padding: const EdgeInsets.all(6),
+                      child: Icon(
+                        Icons.arrow_back_ios_new_rounded,
+                        size: 18,
+                        color: Colors.teal.shade600,
+                      ),
+                    ),
+                  ),
                 ),
                 const SizedBox(width: 4),
                 const Text(
@@ -2840,18 +6488,12 @@ class _BleScanPageState extends State<BleScanPage> {
 
     if (scanning) return;
 
-    // ✅ ADD THESE HIGH-POWER SCAN SETTINGS
+    // Aggressive scan settings for maximum range
     await FlutterBluePlus.startScan(
-      timeout: const Duration(seconds: 5),
-      androidScanMode: AndroidScanMode.lowLatency, // ← High power scan
-      androidUsesFineLocation: true, // ← Better accuracy
+      timeout: const Duration(seconds: 15),
+      androidScanMode: AndroidScanMode.lowLatency,
+      androidUsesFineLocation: true,
     );
-  }
-
-  Future<void> _stopScan() async {
-    if (scanning) {
-      await FlutterBluePlus.stopScan();
-    }
   }
 
   Future<void> stopScan() async {
@@ -2863,37 +6505,42 @@ class _BleScanPageState extends State<BleScanPage> {
   Future<void> connect(BluetoothDevice d, bool isLeft) async {
     await stopScan();
 
-    print('🔵 Connecting to ${d.platformName}...');
+    try {
+      await d.connect(
+        timeout: const Duration(seconds: 30),
+        autoConnect: false,
+        mtu: null,
+      );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Connection failed: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+      return;
+    }
 
-    // ✅ FIX 1: Add autoConnect and mtu parameters
-    await d.connect(
-      timeout: const Duration(seconds: 15),
-      autoConnect: false, // ← CRITICAL! Forces direct high-power connection
-      mtu: null, // ← Let Flutter negotiate best MTU
-    );
-
-    print('✅ Connected! Optimizing connection...');
-
-    // ✅ FIX 2: Request HIGH PRIORITY immediately after connect
+    // Request HIGH PRIORITY for better connection stability
     try {
       await d.requestConnectionPriority(
         connectionPriorityRequest: ConnectionPriority.high,
       );
-      print('✅ High priority connection enabled');
     } catch (e) {
-      print('⚠️ Priority request failed (non-fatal): $e');
+      // Non-fatal error
     }
 
-    // ✅ FIX 3: Request larger MTU for better throughput
+    // Request larger MTU for better throughput
     try {
-      final mtu = await d.requestMtu(512);
-      print('✅ MTU negotiated: $mtu bytes');
+      await d.requestMtu(512);
     } catch (e) {
-      print('⚠️ MTU request failed (non-fatal): $e');
+      // Non-fatal error
     }
 
-    // ✅ FIX 4: Give Android BLE stack time to stabilize
-    await Future.delayed(const Duration(milliseconds: 300));
+    // Stabilization delay
+    await Future.delayed(const Duration(milliseconds: 800));
 
     // Now save device
     setState(() {
@@ -2918,13 +6565,11 @@ class _BleScanPageState extends State<BleScanPage> {
         ),
       );
     }
-
-    print('✅ ${isLeft ? "LEFT" : "RIGHT"} device ready');
   }
 
   @override
   void dispose() {
-    _stopScan();
+    stopScan();
     super.dispose();
   }
 
@@ -2933,118 +6578,154 @@ class _BleScanPageState extends State<BleScanPage> {
     final bool bothConnected = leftConnected && rightConnected;
 
     return Container(
-      color: Colors.white,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          children: [
-            // Scan Button
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: scanning ? null : startScan,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.teal,
-                  foregroundColor: Colors.white,
-                ),
-                child: Text(scanning ? 'Scanning…' : 'Scan BLE Devices'),
+      color: const Color(
+        0xFFE0F2F1,
+      ), // Light teal background matching app theme
+      child: Column(
+        children: [
+          // Header with connection status
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                colors: bothConnected
+                    ? [Colors.green.shade400, Colors.green.shade600]
+                    : [Colors.teal.shade400, Colors.teal.shade600],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
               ),
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: [
+                BoxShadow(
+                  color: (bothConnected ? Colors.green : Colors.teal)
+                      .withOpacity(0.3),
+                  blurRadius: 15,
+                  offset: const Offset(0, 5),
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-
-            // Connection Status Card
-            Card(
-              color: bothConnected
-                  ? Colors.green.shade50
-                  : Colors.grey.shade100,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
+            child: Column(
+              children: [
+                // Device icons row
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    // Left device
+                    _buildDeviceIndicator(
+                      'Left',
+                      Icons.chevron_left,
+                      leftConnected,
+                      leftDevice?.platformName,
+                    ),
+                    // Connection line
+                    Container(
+                      width: 60,
+                      height: 3,
+                      decoration: BoxDecoration(
+                        color: bothConnected
+                            ? Colors.white
+                            : Colors.white.withOpacity(0.3),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    // Right device
+                    _buildDeviceIndicator(
+                      'Right',
+                      Icons.chevron_right,
+                      rightConnected,
+                      rightDevice?.platformName,
+                    ),
+                  ],
+                ),
+                if (bothConnected) ...[
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        // LEFT indicator
-                        Column(
-                          children: [
-                            Icon(
-                              leftConnected ? Icons.check_circle : Icons.cancel,
-                              color: leftConnected ? Colors.green : Colors.red,
-                              size: 32,
-                            ),
-                            const SizedBox(height: 4),
-                            const Text(
-                              'LEFT',
-                              style: TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                            if (leftDevice != null)
-                              Text(
-                                leftDevice!.platformName,
-                                style: const TextStyle(fontSize: 10),
-                              ),
-                          ],
-                        ),
-                        // RIGHT indicator
-                        Column(
-                          children: [
-                            Icon(
-                              rightConnected
-                                  ? Icons.check_circle
-                                  : Icons.cancel,
-                              color: rightConnected ? Colors.green : Colors.red,
-                              size: 32,
-                            ),
-                            const SizedBox(height: 4),
-                            const Text(
-                              'RIGHT',
-                              style: TextStyle(fontWeight: FontWeight.bold),
-                            ),
-                            if (rightDevice != null)
-                              Text(
-                                rightDevice!.platformName,
-                                style: const TextStyle(fontSize: 10),
-                              ),
-                          ],
+                        Icon(Icons.check_circle, color: Colors.white, size: 18),
+                        SizedBox(width: 8),
+                        Text(
+                          'Ready for testing!',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ],
                     ),
+                  ),
+                ],
+              ],
+            ),
+          ),
 
-                    // Show "Continue to Test" button when both connected
-                    if (bothConnected) ...[
-                      const SizedBox(height: 16),
-                      const Divider(),
-                      const SizedBox(height: 8),
-                      const Text(
-                        '✓ Both devices connected!',
-                        style: TextStyle(
-                          color: Colors.green,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
+          // Scan button
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: GestureDetector(
+              onTap: scanning ? null : startScan,
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(
+                    color: scanning ? Colors.grey.shade300 : Colors.teal,
+                    width: 2,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.05),
+                      blurRadius: 10,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    if (scanning) ...[
+                      SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.teal.shade400,
                         ),
                       ),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                        width: double.infinity,
-                        child: ElevatedButton.icon(
-                          onPressed: () {
-                            // Navigate to DataCollectionPage
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (_) => DataCollectionPage(
-                                  leftDevice: leftDevice!,
-                                  rightDevice: rightDevice!,
-                                ),
-                              ),
-                            );
-                          },
-                          icon: const Icon(Icons.play_arrow),
-                          label: const Text('Continue to Test'),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.green,
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(vertical: 16),
-                          ),
+                      const SizedBox(width: 12),
+                      Text(
+                        'Scanning for devices...',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.grey.shade600,
+                        ),
+                      ),
+                    ] else ...[
+                      Icon(
+                        Icons.bluetooth_searching,
+                        color: Colors.teal.shade600,
+                      ),
+                      const SizedBox(width: 12),
+                      Text(
+                        'Scan for Devices',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.teal.shade700,
                         ),
                       ),
                     ],
@@ -3052,96 +6733,369 @@ class _BleScanPageState extends State<BleScanPage> {
                 ),
               ),
             ),
+          ),
 
-            const SizedBox(height: 12),
+          const SizedBox(height: 16),
 
-            // Device List
-            Expanded(
-              child: scanResults.isEmpty
-                  ? const Center(
-                      child: Text(
-                        'No devices found.\nTap Scan to search.',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.grey),
-                      ),
-                    )
-                  : ListView.builder(
-                      itemCount: scanResults.length,
-                      itemBuilder: (context, index) {
-                        final r = scanResults[index];
-                        final name = r.device.platformName.isNotEmpty
-                            ? r.device.platformName
-                            : 'Unknown Device';
+          // Section label
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: Row(
+              children: [
+                Text(
+                  'Available Devices',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.grey.shade700,
+                  ),
+                ),
+                const Spacer(),
+                if (scanResults.isNotEmpty)
+                  Text(
+                    '${scanResults.length} found',
+                    style: TextStyle(fontSize: 14, color: Colors.grey.shade500),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
 
-                        return Card(
-                          child: Padding(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 8,
-                            ),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  name,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  r.device.remoteId.str,
-                                  style: const TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey,
-                                  ),
-                                ),
-                                const SizedBox(height: 8),
-                                Row(
-                                  children: [
-                                    Expanded(
-                                      child: ElevatedButton(
-                                        onPressed: leftDevice == null
-                                            ? () => connect(r.device, true)
-                                            : null,
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: leftDevice == null
-                                              ? Colors.teal
-                                              : Colors.grey,
-                                        ),
-                                        child: Text(
-                                          leftDevice == r.device
-                                              ? 'LEFT ✓'
-                                              : 'Connect LEFT',
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: ElevatedButton(
-                                        onPressed: rightDevice == null
-                                            ? () => connect(r.device, false)
-                                            : null,
-                                        style: ElevatedButton.styleFrom(
-                                          backgroundColor: rightDevice == null
-                                              ? Colors.teal
-                                              : Colors.grey,
-                                        ),
-                                        child: Text(
-                                          rightDevice == r.device
-                                              ? 'RIGHT ✓'
-                                              : 'Connect RIGHT',
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
+          // Device List
+          Expanded(
+            child: scanResults.isEmpty
+                ? Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(24),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.teal.withOpacity(0.1),
+                                blurRadius: 20,
+                                spreadRadius: 5,
+                              ),
+                            ],
                           ),
-                        );
-                      },
+                          child: Icon(
+                            Icons.bluetooth,
+                            size: 48,
+                            color: Colors.teal.shade300,
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        Text(
+                          'No devices found',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.grey.shade700,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Tap scan to search for nearby devices',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey.shade500,
+                          ),
+                        ),
+                      ],
                     ),
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    itemCount: scanResults.length,
+                    itemBuilder: (context, index) {
+                      final r = scanResults[index];
+                      final name = r.device.platformName.isNotEmpty
+                          ? r.device.platformName
+                          : 'Unknown Device';
+                      final isLeftDevice = leftDevice == r.device;
+                      final isRightDevice = rightDevice == r.device;
+
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        decoration: BoxDecoration(
+                          color: Colors.white,
+                          borderRadius: BorderRadius.circular(16),
+                          border: (isLeftDevice || isRightDevice)
+                              ? Border.all(color: Colors.green, width: 2)
+                              : null,
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.05),
+                              blurRadius: 10,
+                              offset: const Offset(0, 2),
+                            ),
+                          ],
+                        ),
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(10),
+                                    decoration: BoxDecoration(
+                                      color: Colors.teal.shade50,
+                                      borderRadius: BorderRadius.circular(10),
+                                    ),
+                                    child: Icon(
+                                      Icons.bluetooth,
+                                      color: Colors.teal.shade600,
+                                      size: 20,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          name,
+                                          style: const TextStyle(
+                                            fontWeight: FontWeight.w600,
+                                            fontSize: 15,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          r.device.remoteId.str,
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            color: Colors.grey.shade500,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  // RSSI indicator
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 8,
+                                      vertical: 4,
+                                    ),
+                                    decoration: BoxDecoration(
+                                      color: Colors.grey.shade100,
+                                      borderRadius: BorderRadius.circular(8),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.signal_cellular_alt,
+                                          size: 14,
+                                          color: r.rssi > -60
+                                              ? Colors.green
+                                              : r.rssi > -80
+                                              ? Colors.orange
+                                              : Colors.red,
+                                        ),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          '${r.rssi}',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            color: Colors.grey.shade600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 12),
+                              Row(
+                                children: [
+                                  Expanded(
+                                    child: _buildConnectButton(
+                                      'Left',
+                                      Icons.chevron_left,
+                                      isLeftDevice,
+                                      leftDevice == null,
+                                      () => connect(r.device, true),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: _buildConnectButton(
+                                      'Right',
+                                      Icons.chevron_right,
+                                      isRightDevice,
+                                      rightDevice == null,
+                                      () => connect(r.device, false),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+
+          // Continue button when both connected
+          if (bothConnected)
+            Padding(
+              padding: const EdgeInsets.all(16),
+              child: GestureDetector(
+                onTap: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => DataCollectionPage(
+                        leftDevice: leftDevice!,
+                        rightDevice: rightDevice!,
+                      ),
+                    ),
+                  );
+                },
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      colors: [Colors.green.shade400, Colors.green.shade600],
+                      begin: Alignment.topLeft,
+                      end: Alignment.bottomRight,
+                    ),
+                    borderRadius: BorderRadius.circular(16),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.green.withOpacity(0.3),
+                        blurRadius: 10,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
+                  ),
+                  child: const Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.play_arrow, color: Colors.white),
+                      SizedBox(width: 8),
+                      Text(
+                        'Continue to Test',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDeviceIndicator(
+    String label,
+    IconData icon,
+    bool connected,
+    String? deviceName,
+  ) {
+    return Column(
+      children: [
+        Container(
+          width: 60,
+          height: 60,
+          decoration: BoxDecoration(
+            color: connected ? Colors.white : Colors.white.withOpacity(0.2),
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 2),
+          ),
+          child: Icon(
+            connected ? Icons.check : icon,
+            color: connected ? Colors.green : Colors.white,
+            size: 28,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Text(
+          label,
+          style: const TextStyle(
+            color: Colors.white,
+            fontWeight: FontWeight.w600,
+            fontSize: 14,
+          ),
+        ),
+        if (deviceName != null)
+          Text(
+            deviceName,
+            style: TextStyle(
+              color: Colors.white.withOpacity(0.8),
+              fontSize: 10,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+      ],
+    );
+  }
+
+  Widget _buildConnectButton(
+    String label,
+    IconData icon,
+    bool isConnected,
+    bool canConnect,
+    VoidCallback onTap,
+  ) {
+    return GestureDetector(
+      onTap: canConnect && !isConnected ? onTap : null,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 10),
+        decoration: BoxDecoration(
+          color: isConnected
+              ? Colors.green.shade50
+              : canConnect
+              ? Colors.teal.shade50
+              : Colors.grey.shade100,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: isConnected
+                ? Colors.green
+                : canConnect
+                ? Colors.teal
+                : Colors.grey.shade300,
+            width: 1.5,
+          ),
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              isConnected ? Icons.check : icon,
+              size: 18,
+              color: isConnected
+                  ? Colors.green
+                  : canConnect
+                  ? Colors.teal
+                  : Colors.grey,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              isConnected ? '$label ✓' : label,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: isConnected
+                    ? Colors.green.shade700
+                    : canConnect
+                    ? Colors.teal.shade700
+                    : Colors.grey,
+              ),
             ),
           ],
         ),
